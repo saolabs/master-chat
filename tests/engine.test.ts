@@ -5,6 +5,7 @@ import { localChat } from "../electron/ai.ts";
 import { emptyState, type State, type DOMProfile } from "../src/core/types.ts";
 import type { Vault } from "../electron/vault.ts";
 import type { Browsers } from "../electron/browser.ts";
+import { SendNotAttemptedError } from "../src/core/send-status.ts";
 function aiConfig(model: string) {
   const ai = emptyState().ai;
   ai.providers.push({
@@ -136,6 +137,64 @@ test("uncertain send is durable and subsequent sending is blocked", async (t) =>
   r.state.drafts.push({ ...r.state.drafts[0], id: "d2", status: "draft" });
   await assert.rejects(r.engine.send("d2", "Reply"), /chưa rõ kết quả/);
 });
+test("a proven pre-send failure preserves a retryable draft instead of uncertain", async (t) => {
+  const r = rig();
+  t.after(() => r.engine.shutdown());
+  r.browsers.send = async () => {
+    throw new SendNotAttemptedError(new Error("Chưa sẵn sàng để gửi"));
+  };
+  await assert.rejects(
+    r.engine.sendMessage("c", "Keep this reply", "m1"),
+    /Chưa sẵn sàng/,
+  );
+  const draft = r.state.drafts[0];
+  assert.equal(draft.status, "draft");
+  assert.equal(draft.text, "Keep this reply");
+  r.browsers.send = async () => {
+    assert.equal(r.state.drafts[0].status, "sending");
+  };
+  await r.engine.send(draft.id, draft.text);
+  assert.equal(r.state.drafts[0].status, "sent");
+});
+test("an automatic pre-send failure becomes a manual draft without background retry", async (t) => {
+  const r = rig();
+  t.after(() => r.engine.shutdown());
+  r.engine.paused = false;
+  r.state.enabledAt = Date.now() - 120_000;
+  r.state.accounts[0].monitorStartedAt = r.state.enabledAt;
+  r.state.conversations[0].autoReply = true;
+  r.state.conversations[0].pendingIds = ["m1"];
+  r.state.drafts.push({
+    id: "auto",
+    conversationId: "c",
+    text: "Reply",
+    basedOnId: "m1",
+    triggerIds: ["m1"],
+    proactive: false,
+    automatic: true,
+    status: "draft",
+    createdAt: Date.now(),
+  });
+  let attempts = 0;
+  r.browsers.send = async () => {
+    attempts++;
+    throw new SendNotAttemptedError(new Error("Preflight blocked"));
+  };
+  r.browsers.scanInbox = async () => ({
+    threads: [],
+    scannedAt: Date.now(),
+    coverage: "visible",
+    revision: 0,
+  });
+  await assert.rejects(
+    r.engine.send("auto", "Reply", true),
+    /Preflight blocked/,
+  );
+  assert.equal(r.state.drafts[0].status, "draft");
+  assert.equal(r.state.drafts[0].automatic, false);
+  await (r.engine as unknown as { tick(): Promise<void> }).tick();
+  assert.equal(attempts, 1);
+});
 test("new message between draft and send invalidates draft without clicking send", async (t) => {
   const r = rig();
   t.after(() => r.engine.shutdown());
@@ -163,6 +222,112 @@ test("new message between draft and send invalidates draft without clicking send
   assert.equal(r.sent(), 0);
   assert.equal(r.state.drafts[0].status, "stale");
 });
+test("explicit manual send tolerates incoming during composition and pre-send sync without pausing AI globally", async (t) => {
+  const r = rig();
+  t.after(() => r.engine.shutdown());
+  r.engine.paused = false;
+  r.browsers.readConversation = async () => [
+    {
+      id: "new-incoming",
+      text: "Another question",
+      direction: "incoming",
+      timestamp: Date.now(),
+      observedAt: Date.now(),
+    },
+  ];
+  r.browsers.send = async (_c, _p, text, _latest, allowed, contextBound) => {
+    assert.equal(text, "Human approved text");
+    assert.equal(contextBound, false);
+    assert.equal(allowed(), true);
+    assert.equal(r.state.drafts.at(-1)?.status, "sending");
+  };
+  r.engine.setComposing("c", true);
+  await r.engine.sendMessage("c", "Human approved text", "old-renderer-id");
+  assert.equal(r.state.drafts.at(-1)?.status, "sent");
+  assert.equal(r.engine.paused, false);
+});
+test("configuration update restores running state but preserves explicit pause and failures", async (t) => {
+  const r = rig();
+  t.after(() => r.engine.shutdown());
+  let resumes = 0;
+  r.engine.resume = async () => {
+    resumes++;
+    r.engine.paused = false;
+  };
+  r.engine.paused = false;
+  await r.engine.configure(async () => {});
+  assert.equal(resumes, 1);
+  assert.equal(r.engine.paused, false);
+  await r.engine.configure(async () => r.engine.pause("User pause"));
+  assert.equal(resumes, 1);
+  assert.equal(r.engine.pauseReason, "User pause");
+  await r.engine.configure(async () => {});
+  assert.equal(r.engine.paused, true);
+  r.engine.paused = false;
+  await assert.rejects(
+    r.engine.configure(async () => {
+      throw new Error("Invalid settings");
+    }),
+    /Invalid settings/,
+  );
+  assert.equal(r.engine.paused, true);
+  assert.equal(resumes, 1);
+});
+test("conversation auto toggle preserves engine state and other scheduled replies", async (t) => {
+  const r = scheduledRig();
+  t.after(() => r.engine.shutdown());
+  const other = {
+    ...structuredClone(r.state.conversations[0]),
+    id: "other",
+    platformId: "999",
+  };
+  r.state.conversations.push(other);
+  await (r.engine as unknown as { tick(): Promise<void> }).tick();
+  assert.ok(r.state.drafts[0].sendAfter);
+  await r.engine.setConversationAuto("other", false);
+  assert.equal(r.engine.paused, false);
+  assert.equal(r.state.conversations[0].autoReply, true);
+  assert.ok(r.state.drafts[0].sendAfter);
+  r.engine.pause("User pause");
+  await r.engine.setConversationAuto("other", true);
+  assert.equal(r.engine.paused, true);
+  assert.equal(r.engine.pauseReason, "User pause");
+});
+
+test("disable and re-enable during automatic generation invalidates only that conversation result", async (t) => {
+  const r = rig(),
+    old = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = old;
+    r.engine.shutdown();
+  });
+  r.engine.paused = false;
+  r.state.conversations[0].autoReply = true;
+  let start!: () => void, finish!: (response: Response) => void;
+  const ready = new Promise<void>((resolve) => {
+    start = resolve;
+  });
+  globalThis.fetch = (() => {
+    start();
+    return new Promise<Response>((resolve) => {
+      finish = resolve;
+    });
+  }) as typeof fetch;
+  const work = r.engine.generate("c", undefined, true);
+  await ready;
+  await r.engine.setConversationAuto("c", false);
+  await r.engine.setConversationAuto("c", true);
+  finish(
+    new Response(
+      JSON.stringify({ choices: [{ message: { content: "Late reply" } }] }),
+    ),
+  );
+  await assert.rejects(work, /đổi|dừng/);
+  assert.equal(r.state.drafts.length, 0);
+  assert.equal(r.engine.paused, false);
+  assert.equal(r.sent(), 0);
+});
+
 test("pause blocks automatic sending before browser work", async (t) => {
   const r = rig();
   t.after(() => r.engine.shutdown());
@@ -332,13 +497,15 @@ test("inbox baseline followed by a new thread routes fresh incoming into native 
   assert.equal(sends, 1);
   assert.equal(calls, 1);
 });
-test("pause during inbox discovery prevents late observation, generation and sending", async (t) => {
+test("pause during inbox discovery permits sync but prevents generation and sending", async (t) => {
   const r = rig();
   t.after(() => r.engine.shutdown());
   let resolve!: (scan: Awaited<ReturnType<Browsers["scanInbox"]>>) => void;
   r.browsers.scanInbox = () => new Promise((res) => (resolve = res));
+  let reads = 0;
   r.browsers.readConversation = async () => {
-    throw new Error("Late observation");
+    reads++;
+    return r.state.conversations[0].messages;
   };
   r.engine.paused = false;
   const ticking = (r.engine as unknown as { tick(): Promise<void> }).tick();
@@ -351,7 +518,414 @@ test("pause during inbox discovery prevents late observation, generation and sen
     revision: 0,
   });
   await ticking;
+  assert.equal(reads, 1);
   assert.equal(r.state.drafts.length, 0);
+  assert.equal(r.sent(), 0);
+});
+
+test("background sync after reopening rotates through read-on-phone threads while paused, without AI", async (t) => {
+  const r = rig(),
+    old = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = old;
+    r.engine.shutdown();
+  });
+  let aiCalls = 0;
+  globalThis.fetch = (async () => {
+    aiCalls++;
+    throw new Error("No AI during sync");
+  }) as typeof fetch;
+  r.state.enabledAt = Date.now() - 120_000;
+  r.state.accounts[0].monitorStartedAt = r.state.enabledAt;
+  const base = structuredClone(r.state.conversations[0]);
+  r.state.conversations = Array.from({ length: 8 }, (_, index) => ({
+    ...structuredClone(base),
+    id: `c${index}`,
+    platformId: String(1000 + index),
+    url: `https://www.facebook.com/messages/t/${1000 + index}/`,
+    lastInboxSignature: "already-read",
+    autoReply: true,
+  }));
+  r.browsers.scanInbox = async () => ({
+    threads: r.state.conversations.map((c) => ({
+      platformId: c.platformId,
+      name: c.name,
+      url: c.url,
+      unread: false,
+      signature: "already-read",
+    })),
+    scannedAt: Date.now(),
+    coverage: "visible",
+    revision: 1,
+  });
+  const reads: string[] = [];
+  r.browsers.readConversation = async (c) => {
+    reads.push(c.id);
+    return [
+      ...c.messages,
+      {
+        id: `offline-${c.id}`,
+        text: "Arrived while app was closed",
+        direction: "incoming",
+        timestamp: Date.now() - 60_000,
+        observedAt: Date.now(),
+      },
+    ];
+  };
+  for (let pass = 0; pass < 8; pass++) await r.engine.refreshSync();
+  assert.equal(new Set(reads).size, 8);
+  for (const c of r.state.conversations) {
+    assert.ok(c.messages.some((m) => m.id === `offline-${c.id}`));
+    assert.ok(c.pendingIds.includes(`offline-${c.id}`));
+  }
+  assert.equal(r.engine.paused, true);
+  assert.equal(aiCalls, 0);
+  assert.equal(r.sent(), 0);
+});
+
+test("a slow AI task does not prevent background synchronization of other conversations", async (t) => {
+  const r = rig(),
+    old = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = old;
+    r.engine.shutdown();
+  });
+  r.state.enabledAt = Date.now() - 120_000;
+  r.state.accounts[0].monitorStartedAt = r.state.enabledAt;
+  const c = r.state.conversations[0];
+  c.autoReply = true;
+  c.pendingIds = ["m1"];
+  c.messages[0].baseline = false;
+  r.state.conversations.push({
+    ...structuredClone(c),
+    id: "other",
+    platformId: "999",
+    url: "https://www.facebook.com/messages/t/999/",
+    autoReply: false,
+    pendingIds: [],
+  });
+  r.browsers.scanInbox = async () => ({
+    threads: [],
+    scannedAt: Date.now(),
+    coverage: "visible",
+    revision: 0,
+  });
+  r.browsers.readConversation = async (c) => c.messages;
+  let resolve!: (response: Response) => void;
+  const started = new Promise<void>((ready) => {
+    globalThis.fetch = (() =>
+      new Promise<Response>((res) => {
+        resolve = res;
+        ready();
+      })) as typeof fetch;
+  });
+  r.engine.paused = false;
+  const ticking = (r.engine as unknown as { tick(): Promise<void> }).tick();
+  await started;
+  r.browsers.readConversation = async (c) => [
+    ...c.messages,
+    {
+      id: "during-ai",
+      text: "Read on phone",
+      direction: "incoming",
+      timestamp: Date.now(),
+      observedAt: Date.now(),
+    },
+  ];
+  await r.engine.refreshSync();
+  assert.equal(r.state.conversations[1].messages.at(-1)?.id, "during-ai");
+  assert.equal(r.sent(), 0);
+  r.engine.pause();
+  resolve(
+    new Response(
+      JSON.stringify({ choices: [{ message: { content: "Late answer" } }] }),
+    ),
+  );
+  await ticking;
+  assert.equal(r.sent(), 0);
+});
+
+test("manual sync reads messages without invoking style learning or AI", async (t) => {
+  const r = rig(),
+    old = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = old;
+    r.engine.shutdown();
+  });
+  let aiCalls = 0;
+  globalThis.fetch = (async () => {
+    aiCalls++;
+    throw new Error("Sync must not run AI");
+  }) as typeof fetch;
+  await r.engine.syncConversation("c");
+  assert.equal(aiCalls, 0);
+  assert.equal(r.sent(), 0);
+});
+
+test("pending replies from background sync dispatch without a fresh scan or selected conversation", async (t) => {
+  const r = rig();
+  t.after(() => r.engine.shutdown());
+  r.engine.paused = false;
+  r.state.enabledAt = Date.now() - 120_000;
+  r.state.accounts[0].monitorStartedAt = r.state.enabledAt;
+  const base = structuredClone(r.state.conversations[0]);
+  r.state.conversations = Array.from({ length: 6 }, (_, index) => ({
+    ...structuredClone(base),
+    id: `background-${index}`,
+    autoReply: true,
+    pendingIds: ["m1"],
+  }));
+  const reads: string[] = [],
+    dispatched: string[] = [];
+  r.browsers.readConversation = async (c) => {
+    reads.push(c.id);
+    return c.messages;
+  };
+  const internal = r.engine as unknown as {
+    syncBatch(): Promise<string[]>;
+    scheduleReply(id: string): Promise<void>;
+    tick(): Promise<void>;
+  };
+  // The sync timer has already ingested these; its next pass is still busy.
+  internal.syncBatch = async () => [];
+  r.engine.generate = async (id, _goal, automatic) => {
+    assert.equal(automatic, true);
+    assert.ok(reads.includes(id));
+    return id;
+  };
+  internal.scheduleReply = async (id) => {
+    dispatched.push(id);
+    r.state.conversations.find((c) => c.id === id)!.pendingIds = [];
+  };
+  for (let n = 0; n < 3; n++) await internal.tick();
+  assert.equal(dispatched.length, 6);
+  assert.equal(r.engine.live.conversationId, null);
+  assert.deepEqual(new Set(dispatched), new Set(reads));
+});
+
+test("new background incoming replies while the selected conversation's model is still running", async (t) => {
+  const r = rig(),
+    old = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = old;
+    r.engine.shutdown();
+  });
+  r.engine.paused = false;
+  r.state.enabledAt = Date.now() - 120_000;
+  r.state.accounts[0].monitorStartedAt = r.state.enabledAt;
+  const slow = r.state.conversations[0];
+  slow.autoReply = true;
+  slow.pendingIds = ["m1"];
+  slow.messages[0].text = "Slow question";
+  r.state.conversations.push({
+    ...structuredClone(slow),
+    id: "background",
+    platformId: "999",
+    pendingIds: [],
+    messages: [],
+  });
+  r.engine.live.conversationId = slow.id;
+  r.browsers.readConversation = async (c) => c.messages;
+  r.browsers.scanInbox = async () => ({
+    threads: [],
+    scannedAt: Date.now(),
+    coverage: "visible",
+    revision: 0,
+  });
+  let release!: (response: Response) => void, started!: () => void;
+  const waiting = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  globalThis.fetch = (async (_url, options) => {
+    if (String(options?.body).includes("Slow question")) {
+      started();
+      return await new Promise<Response>((resolve) => {
+        release = resolve;
+      });
+    }
+    return new Response(
+      JSON.stringify({
+        choices: [{ message: { content: "Fast background answer" } }],
+      }),
+    );
+  }) as typeof fetch;
+  const sent: string[] = [];
+  r.browsers.send = async (c) => {
+    sent.push(c.id);
+  };
+  const internal = r.engine as unknown as { tick(): Promise<void> };
+  const first = internal.tick();
+  await waiting;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(r.engine.replying, ["c"]);
+  const background = r.state.conversations[1];
+  background.messages.push({
+    ...slow.messages[0],
+    id: "new-background",
+    text: "Fast question",
+    timestamp: Date.now(),
+    baseline: false,
+  });
+  background.pendingIds = ["new-background"];
+  await internal.tick();
+  assert.deepEqual(sent, ["background"]);
+  assert.equal(r.engine.live.conversationId, "c");
+  assert.deepEqual(r.engine.replying, ["c"]);
+  assert.deepEqual(background.pendingIds, []);
+  r.engine.pause();
+  release(
+    new Response(
+      JSON.stringify({ choices: [{ message: { content: "Late answer" } }] }),
+    ),
+  );
+  await first;
+  assert.deepEqual(sent, ["background"]);
+  assert.deepEqual(r.engine.replying, []);
+});
+
+test("background dispatch bounds model jobs and never duplicates an active conversation", async (t) => {
+  const r = rig();
+  t.after(() => r.engine.shutdown());
+  r.engine.paused = false;
+  r.state.enabledAt = Date.now() - 120_000;
+  r.state.accounts[0].monitorStartedAt = r.state.enabledAt;
+  const base = r.state.conversations[0];
+  r.state.conversations = ["one", "two", "three"].map((id) => ({
+    ...structuredClone(base),
+    id,
+    autoReply: true,
+    pendingIds: ["m1"],
+  }));
+  r.browsers.readConversation = async (c) => c.messages;
+  const internal = r.engine as unknown as {
+    tick(): Promise<void>;
+    syncBatch(): Promise<string[]>;
+    scheduleReply(id: string): Promise<void>;
+  };
+  internal.syncBatch = async () => [];
+  const releases = new Map<string, (id: string) => void>();
+  r.engine.generate = (id) =>
+    new Promise<string>((resolve) => {
+      releases.set(id, resolve);
+    });
+  internal.scheduleReply = async (id) => {
+    r.state.conversations.find((c) => c.id === id)!.pendingIds = [];
+  };
+  const first = internal.tick();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(releases.size, 2);
+  assert.equal(r.engine.replying.length, 2);
+  await internal.tick();
+  assert.equal(releases.size, 2);
+  const [done, waiting] = [...releases.keys()];
+  releases.get(done)!(done);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const next = internal.tick();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(releases.size, 3);
+  assert.equal(r.engine.replying.length, 2);
+  for (const [id, resolve] of releases) if (id !== done) resolve(id);
+  await Promise.all([first, next]);
+  assert.deepEqual(r.engine.replying, []);
+  assert.equal(
+    r.state.conversations.find((c) => c.id === waiting)!.pendingIds.length,
+    0,
+  );
+});
+
+test("background reply candidates recheck new outgoing and retain manual/uncertain guards", async (t) => {
+  const r = rig();
+  t.after(() => r.engine.shutdown());
+  r.engine.paused = false;
+  r.state.enabledAt = Date.now() - 120_000;
+  const base = structuredClone(r.state.conversations[0]);
+  r.state.conversations = ["manual", "uncertain", "answered", "ready"].map(
+    (id) => ({
+      ...structuredClone(base),
+      id,
+      autoReply: true,
+      pendingIds: ["m1"],
+    }),
+  );
+  for (const status of ["draft", "uncertain"] as const)
+    r.state.drafts.push({
+      id: status,
+      conversationId: status === "draft" ? "manual" : "uncertain",
+      text: "Keep draft",
+      basedOnId: "m1",
+      triggerIds: ["m1"],
+      proactive: false,
+      status,
+      createdAt: Date.now(),
+      automatic: false,
+    });
+  const generated: string[] = [];
+  r.browsers.readConversation = async (c) =>
+    c.id === "answered"
+      ? [
+          ...c.messages,
+          {
+            id: "phone-outgoing",
+            text: "Already answered on phone",
+            direction: "outgoing",
+            timestamp: Date.now(),
+            observedAt: Date.now(),
+          },
+        ]
+      : c.messages;
+  const internal = r.engine as unknown as {
+    syncBatch(): Promise<string[]>;
+    scheduleReply(id: string): Promise<void>;
+    tick(): Promise<void>;
+  };
+  internal.syncBatch = async () => [];
+  internal.scheduleReply = async () => {};
+  r.engine.generate = async (id) => {
+    generated.push(id);
+    return id;
+  };
+  await internal.tick();
+  assert.deepEqual(generated, ["ready"]);
+  assert.equal(r.state.drafts[0].text, "Keep draft");
+  assert.equal(r.state.drafts[1].status, "uncertain");
+  assert.equal(r.sent(), 0);
+});
+
+test("selected and blocked pending threads cannot starve new inbox priorities", async (t) => {
+  const r = rig();
+  t.after(() => r.engine.shutdown());
+  const base = structuredClone(r.state.conversations[0]);
+  r.state.conversations = Array.from({ length: 10 }, (_, index) => ({
+    ...structuredClone(base),
+    id: `thread-${index}`,
+    platformId: String(2000 + index),
+    url: `https://www.facebook.com/messages/t/${2000 + index}/`,
+    pendingIds: index < 3 ? ["m1"] : [],
+  }));
+  r.engine.live.conversationId = "thread-0";
+  r.browsers.scanInbox = async () => ({
+    threads: r.state.conversations.slice(3).map((c) => ({
+      platformId: c.platformId,
+      name: c.name,
+      url: c.url,
+      unread: true,
+      signature: "fresh",
+    })),
+    scannedAt: Date.now(),
+    coverage: "visible",
+    revision: 1,
+  });
+  const reads: string[] = [];
+  r.browsers.readConversation = async (c) => {
+    reads.push(c.id);
+    if (c.id === "thread-3") throw new Error("Persistent thread failure");
+    return c.messages;
+  };
+  const internal = r.engine as unknown as { syncBatch(): Promise<string[]> };
+  for (let pass = 0; pass < 4; pass++) await internal.syncBatch();
+  for (const c of r.state.conversations.slice(4))
+    assert.ok(reads.includes(c.id), c.id);
+  assert.equal(r.engine.paused, true);
   assert.equal(r.sent(), 0);
 });
 
@@ -571,7 +1145,7 @@ test("live incoming updates during AI generation and invalidates the old result"
   assert.equal(r.state.drafts.length, 0);
   assert.equal(r.sent(), 0);
 });
-test("automatic scan processes a bounded batch and the selected thread precedes old unread threads", async (t) => {
+test("background scan has its own bounded budget while the selected thread uses the live reader", async (t) => {
   const r = rig();
   t.after(() => r.engine.shutdown());
   const base = r.state.conversations[0];
@@ -604,7 +1178,8 @@ test("automatic scan processes a bounded batch and the selected thread precedes 
   });
   r.engine.paused = false;
   await (r.engine as unknown as { tick(): Promise<void> }).tick();
-  assert.equal(reads[0], selected.id);
+  assert.equal(reads[0], "c0");
+  assert.ok(r.engine.live.updatedAt);
   assert.ok(reads.length <= 4);
   assert.equal(reads.length, 4);
   for (let n = 0; n < 8; n++)
@@ -668,7 +1243,7 @@ test("manual messages need no AI or resume, persist outbox, consume triggers and
   assert.deepEqual(r.state.conversations[0].pendingIds, []);
 });
 
-test("manual sending respects stale context, uncertain results, unverified profiles and validation", async (t) => {
+test("manual sending respects uncertain results, unverified profiles and validation", async (t) => {
   const r = rig();
   t.after(() => r.engine.shutdown());
   await assert.rejects(r.engine.sendMessage("c", " ", "m1"), /5000/);
@@ -676,7 +1251,6 @@ test("manual sending respects stale context, uncertain results, unverified profi
     r.engine.sendMessage("c", "x".repeat(5001), "m1"),
     /5000/,
   );
-  await assert.rejects(r.engine.sendMessage("c", "Reply", null), /đã đổi/);
   r.state.profiles["messenger-personal"]!.verified = false;
   await assert.rejects(r.engine.sendMessage("c", "Reply", "m1"), /kiểm chứng/);
   r.state.profiles["messenger-personal"]!.verified = true;
@@ -771,9 +1345,10 @@ test("manual AI draft is retained across background ticks", async (t) => {
   assert.equal(r.sent(), 0);
 });
 
-test("account-wide auto applies to current and discovered conversations without starting sending", async (t) => {
+test("account-wide auto enables current and discovered conversations and starts monitoring", async (t) => {
   const r = rig();
   t.after(() => r.engine.shutdown());
+  r.state.accounts.push({ ...r.state.accounts[0], id: "other-account" });
   r.state.conversations.push({
     ...r.state.conversations[0],
     id: "other",
@@ -782,13 +1357,72 @@ test("account-wide auto applies to current and discovered conversations without 
   });
   r.engine.paused = false;
   await r.engine.setAccountAuto("a", true);
-  assert.equal(r.engine.paused, true);
+  assert.equal(r.engine.paused, false);
   assert.equal(r.state.accounts[0].autoDiscoverReply, true);
   assert.equal(r.state.conversations[0].autoReply, true);
   assert.equal(r.state.conversations[1].autoReply, false);
   assert.equal(r.sent(), 0);
   await r.engine.setAccountAuto("a", false);
   assert.equal(r.state.accounts[0].autoDiscoverReply, false);
+  assert.equal(r.state.conversations[0].autoReply, false);
+  assert.equal(r.engine.paused, false);
+});
+
+test("global activation includes every account without clearing uncertain drafts or cutoffs", async (t) => {
+  const r = rig();
+  t.after(() => r.engine.shutdown());
+  r.state.accounts.push({ ...r.state.accounts[0], id: "b" });
+  r.state.accounts[0].monitorStartedAt = 100;
+  r.state.enabledAt = 50;
+  r.state.conversations.push({
+    ...r.state.conversations[0],
+    id: "other",
+    accountId: "b",
+  });
+  r.state.drafts.push({
+    id: "uncertain",
+    conversationId: "c",
+    text: "Keep",
+    basedOnId: "m1",
+    triggerIds: [],
+    proactive: false,
+    status: "uncertain",
+    createdAt: 1,
+  });
+  await r.engine.setAllAuto(true);
+  assert.equal(r.engine.paused, false);
+  assert.ok(r.state.accounts.every((a) => a.autoDiscoverReply));
+  assert.ok(r.state.conversations.every((c) => c.autoReply));
+  assert.equal(r.state.accounts[0].monitorStartedAt, 100);
+  assert.equal(r.state.enabledAt, 50);
+  assert.equal(r.state.drafts[0].status, "uncertain");
+  assert.equal(r.sent(), 0);
+  await r.engine.setAllAuto(false);
+  assert.ok(r.state.accounts.every((a) => !a.autoDiscoverReply));
+  assert.ok(r.state.conversations.every((c) => !c.autoReply));
+});
+
+test("a new explicit pause during activation is not overridden", async (t) => {
+  const r = rig();
+  t.after(() => r.engine.shutdown());
+  const engine = r.engine as unknown as { vault: Vault };
+  let writes = 0;
+  engine.vault.mutate = async (fn) => {
+    const result = fn(r.state);
+    if (++writes === 2) r.engine.pause("User paused");
+    return result;
+  };
+  await r.engine.setAllAuto(true);
+  assert.equal(r.engine.paused, true);
+  assert.equal(r.engine.pauseReason, "User paused");
+});
+
+test("activation without a reply model does not report a running engine", async (t) => {
+  const r = rig();
+  t.after(() => r.engine.shutdown());
+  r.state.ai = emptyState().ai;
+  await assert.rejects(r.engine.setAllAuto(true));
+  assert.equal(r.engine.paused, true);
   assert.equal(r.state.conversations[0].autoReply, false);
 });
 
@@ -1231,7 +1865,7 @@ test("review model corrects topic dragging and rechecks the exact final draft", 
   assert.match(draft.review!.originalText!, /debug/);
 });
 
-test("held, invalid and failed reviews preserve drafts and block automatic sending", async (t) => {
+test("advisory reviews repair held replies and never require manual approval for automatic sending", async (t) => {
   const old = globalThis.fetch;
   t.after(() => {
     globalThis.fetch = old;
@@ -1243,12 +1877,16 @@ test("held, invalid and failed reviews preserve drafts and block automatic sendi
     c.autoReply = true;
     c.pendingIds = ["m1"];
     r.engine.paused = false;
+    r.state.enabledAt = Date.now() - 120_000;
+    r.state.accounts[0].monitorStartedAt = r.state.enabledAt;
     r.state.ai.providers[0].models.push("checker");
     r.state.response = {
       review: { enabled: true, model: { providerId: "p", modelId: "checker" } },
     };
+    const models: string[] = [];
     globalThis.fetch = (async (_url, options) => {
       const body = JSON.parse(options!.body as string);
+      models.push(body.model);
       if (body.model === "checker" && result === "failure")
         return new Response("private failure", { status: 503 });
       const text =
@@ -1259,21 +1897,179 @@ test("held, invalid and failed reviews preserve drafts and block automatic sendi
                 verdict: "hold",
                 issues: ["Cần chủ tài khoản xác nhận lời hứa."],
               })
-          : "Để mình xem lại nhé.";
+          : models.length > 1
+            ? "Mình chưa đủ thông tin để hứa chắc, bạn nói rõ thêm nhé."
+            : "Để mình xem lại nhé.";
       return new Response(
         JSON.stringify({ choices: [{ message: { content: text } }] }),
       );
     }) as typeof fetch;
     const id = await r.engine.generate("c", undefined, true);
     assert.equal(r.state.drafts.at(-1)?.status, "draft");
-    await assert.rejects(
-      r.engine.send(id, r.state.drafts.at(-1)!.text, true),
-      /kiểm tra/,
-    );
-    assert.equal(r.sent(), 0);
-    await r.engine.send(id, r.state.drafts.at(-1)!.text, false);
+    if (result === "hold") {
+      assert.deepEqual(models, [
+        "local-test",
+        "checker",
+        "local-test",
+        "checker",
+      ]);
+      assert.match(r.state.drafts.at(-1)!.text, /chưa đủ thông tin/);
+      assert.equal(r.state.drafts.at(-1)!.review?.status, "held");
+    } else assert.equal(r.state.drafts.at(-1)!.review?.status, "unavailable");
+    await r.engine.send(id, r.state.drafts.at(-1)!.text, true);
     assert.equal(r.sent(), 1);
+    assert.equal(r.state.drafts.at(-1)!.status, "sent");
   }
+});
+
+test("review recheck requests Google structured output, preserves draft identity and never sends", async (t) => {
+  const r = rig(),
+    old = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = old;
+    r.engine.shutdown();
+  });
+  Object.assign(r.state.ai.providers[0], {
+    type: "google",
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+    allowRemote: true,
+    models: ["writer", "checker"],
+  });
+  r.state.ai.default = { providerId: "p", modelId: "writer" };
+  r.state.response = {
+    review: { enabled: true, model: { providerId: "p", modelId: "checker" } },
+  };
+  r.state.drafts.push({
+    id: "held",
+    conversationId: "c",
+    text: "Reply",
+    basedOnId: "m1",
+    triggerIds: ["m1"],
+    proactive: false,
+    status: "draft",
+    createdAt: 1,
+    automatic: false,
+    review: { status: "unavailable", issues: [], checkedAt: 1 },
+  });
+  globalThis.fetch = (async (_url, options) => {
+    const body = JSON.parse(options!.body as string);
+    assert.equal(body.generationConfig.responseMimeType, "application/json");
+    assert.deepEqual(
+      body.generationConfig.responseJsonSchema.properties.verdict.enum,
+      ["approve", "revise", "hold"],
+    );
+    return new Response(
+      JSON.stringify({
+        candidates: [
+          {
+            content: {
+              parts: [
+                { text: JSON.stringify({ verdict: "approve", issues: [] }) },
+              ],
+            },
+          },
+        ],
+      }),
+    );
+  }) as typeof fetch;
+  await r.engine.recheckDraft("held", "Edited reply");
+  assert.equal(r.state.drafts[0].review?.status, "approved");
+  assert.equal(r.state.drafts[0].text, "Edited reply");
+  assert.equal(r.state.drafts[0].automatic, false);
+  assert.equal(r.sent(), 0);
+  r.state.drafts[0].status = "uncertain";
+  await assert.rejects(r.engine.recheckDraft("held", "Edited reply"));
+});
+
+test("review recheck cannot overwrite a draft after incoming or pause during the request", async (t) => {
+  const old = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = old;
+  });
+  for (const change of ["incoming", "pause"]) {
+    const r = rig();
+    t.after(() => r.engine.shutdown());
+    r.state.ai.providers[0].models.push("checker");
+    r.state.response = {
+      review: { model: { providerId: "p", modelId: "checker" } },
+    };
+    r.state.drafts.push({
+      id: "held",
+      conversationId: "c",
+      text: "Original",
+      basedOnId: "m1",
+      triggerIds: ["m1"],
+      proactive: false,
+      status: "draft",
+      createdAt: 1,
+      review: { status: "unavailable", issues: [], checkedAt: 1 },
+    });
+    let entered!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let finish!: (response: Response) => void;
+    globalThis.fetch = (() => {
+      entered();
+      return new Promise<Response>((resolve) => {
+        finish = resolve;
+      });
+    }) as typeof fetch;
+    const checking = r.engine.recheckDraft("held", "Edited");
+    await ready;
+    if (change === "pause") r.engine.pause();
+    else
+      r.state.conversations[0].messages.push({
+        ...r.state.conversations[0].messages[0],
+        id: "new",
+        text: "New question",
+      });
+    finish(
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({ verdict: "approve", issues: [] }),
+              },
+            },
+          ],
+        }),
+      ),
+    );
+    await assert.rejects(checking, /dừng|đổi/);
+    assert.equal(r.state.drafts[0].text, "Original");
+    assert.equal(r.state.drafts[0].review?.status, "unavailable");
+    assert.equal(r.sent(), 0);
+  }
+});
+
+test("review errors expose safe HTTP diagnostics but never provider body or malformed output", async (t) => {
+  const r = rig(),
+    old = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = old;
+    r.engine.shutdown();
+  });
+  r.state.ai.providers[0].models.push("checker");
+  r.state.response = {
+    review: { enabled: true, model: { providerId: "p", modelId: "checker" } },
+  };
+  globalThis.fetch = (async (_url, options) => {
+    const body = JSON.parse(options!.body as string);
+    return body.model === "checker"
+      ? new Response("secret key and private history", { status: 429 })
+      : new Response(
+          JSON.stringify({ choices: [{ message: { content: "Reply" } }] }),
+        );
+  }) as typeof fetch;
+  await r.engine.generate("c");
+  assert.match(r.state.drafts[0].review!.issues.join(" "), /HTTP 429/);
+  assert.doesNotMatch(
+    JSON.stringify(r.state.drafts[0].review),
+    /secret|private/,
+  );
+  assert.equal(r.sent(), 0);
 });
 
 test("pause or a new incoming during review cannot save a stale result", async (t) => {
@@ -1348,4 +2144,63 @@ test("backfill imports old context without generating automatic reply triggers",
   assert.equal(c.messages[0].baseline, true);
   assert.deepEqual(c.pendingIds, ["m1"]);
   assert.equal(r.sent(), 0);
+});
+
+test("engine persists a rotated key and starts subsequent generations with it", async (t) => {
+  const r = rig(),
+    before = globalThis.fetch;
+  r.state.ai.providers[0].apiKey = "first";
+  r.state.ai.providers[0].apiKeys = ["first", "second"];
+  const calls: string[] = [];
+  globalThis.fetch = (async (_url, options) => {
+    const key = (options?.headers as any).Authorization;
+    calls.push(key);
+    return key === "Bearer first"
+      ? new Response("exhausted", { status: 402 })
+      : new Response(
+          JSON.stringify({ choices: [{ message: { content: "Xin chào" } }] }),
+        );
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = before;
+    r.engine.shutdown();
+  });
+  await r.engine.generate("c");
+  assert.equal(r.state.ai.providers[0].activeApiKeyIndex, 1);
+  await r.engine.generate("c");
+  assert.deepEqual(calls, ["Bearer first", "Bearer second", "Bearer second"]);
+});
+
+test("a fallback writer cannot also serve as reviewer for that draft", async (t) => {
+  const r = rig(),
+    before = globalThis.fetch;
+  r.state.ai.providers[0].models = ["special", "common"];
+  r.state.ai.default = { providerId: "p", modelId: "common" };
+  r.state.ai.tasks.reply = { providerId: "p", modelId: "special" };
+  r.state.response = {
+    review: { enabled: true, model: { providerId: "p", modelId: "common" } },
+  };
+  const calls: string[] = [];
+  globalThis.fetch = (async (_url, options) => {
+    const model = JSON.parse(options?.body as string).model;
+    calls.push(model);
+    return new Response(
+      JSON.stringify({
+        choices: [
+          { message: { content: model === "special" ? "" : "Xin chào" } },
+        ],
+      }),
+    );
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = before;
+    r.engine.shutdown();
+  });
+  await r.engine.generate("c");
+  assert.deepEqual(calls, ["special", "common"]);
+  assert.equal(r.state.drafts.at(-1)?.review?.status, "unavailable");
+  assert.match(
+    r.state.drafts.at(-1)?.review?.issues.join(" ") ?? "",
+    /khác model viết/,
+  );
 });

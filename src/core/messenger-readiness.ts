@@ -30,6 +30,7 @@ export async function waitForMessengerRead(
   expected: { platformId: string; name: string },
   stage: string,
   delay = () => new Promise<void>((resolve) => setTimeout(resolve, 250)),
+  onRetry?: (read: MessengerRead, attempt: number) => Promise<void>,
 ): Promise<MessengerRead> {
   let issue = "DOM chưa sẵn sàng.";
   for (let attempt = 0; attempt < 12; attempt++) {
@@ -37,7 +38,10 @@ export async function waitForMessengerRead(
     const current = messengerReadIssue(read, expected);
     if (!current) return read;
     issue = current;
-    if (attempt < 11) await delay();
+    if (attempt < 11) {
+      await onRetry?.(read, attempt);
+      await delay();
+    }
   }
   throw new Error(`${stage}: ${issue}`);
 }

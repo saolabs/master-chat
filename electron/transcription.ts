@@ -1,3 +1,8 @@
+import {
+  withProviderKeys,
+  providerHTTPError,
+  type KeyOptions,
+} from "./provider-keys.ts";
 import { execFile } from "node:child_process";
 import { constants } from "node:fs";
 import {
@@ -245,6 +250,34 @@ async function transcribeWithProvider(
   selection: ModelSelection,
   language: string,
   signal?: AbortSignal,
+  options?: KeyOptions,
+) {
+  const { provider } = validateTranscriptionSelection(config, selection);
+  return withProviderKeys(
+    provider,
+    (selected) =>
+      transcribeWithKey(
+        {
+          ...config,
+          providers: config.providers.map((p) =>
+            p.id === selected.id ? selected : p,
+          ),
+        },
+        media,
+        selection,
+        language,
+        signal,
+      ),
+    signal,
+    options,
+  );
+}
+async function transcribeWithKey(
+  config: AIConfig,
+  media: MediaPayload,
+  selection: ModelSelection,
+  language: string,
+  signal?: AbortSignal,
 ) {
   const { provider } = validateTranscriptionSelection(config, selection);
   const base = providerURL(provider, provider.allowRemote)
@@ -279,9 +312,15 @@ async function transcribeWithProvider(
     });
   } catch (e) {
     if (signal?.aborted) throw e;
-    throw new Error("Không kết nối được dịch vụ phiên âm.");
+    throw Object.assign(new Error("Không kết nối được dịch vụ phiên âm."), {
+      retryKey: true,
+    });
   }
-  if (!response.ok) throw new Error(`Phiên âm trả HTTP ${response.status}.`);
+  if (!response.ok)
+    throw await providerHTTPError(
+      response,
+      `Phiên âm trả HTTP ${response.status}.`,
+    );
   const reader = response.body?.getReader();
   if (!reader) throw new Error("Dịch vụ phiên âm trả nội dung rỗng.");
   const chunks: Uint8Array[] = [];
@@ -314,6 +353,7 @@ export async function transcribeAudio(
   override?: ModelSelection | null,
   signal?: AbortSignal,
   settings?: TranscriptionSettings,
+  options?: KeyOptions,
 ) {
   signal?.throwIfAborted();
   if (
@@ -330,7 +370,14 @@ export async function transcribeAudio(
   if (transcriptionMode(settings, override) === "provider") {
     if (!override)
       throw new Error("Chọn model chuyên phiên âm tại Cấu hình AI → Phiên âm.");
-    return transcribeWithProvider(config, media, override, language, signal);
+    return transcribeWithProvider(
+      config,
+      media,
+      override,
+      language,
+      signal,
+      options,
+    );
   }
   // Reuse an existing local STT service only, never the default cloud/chat model.
   if (!settings?.executable && !settings?.modelPath && !settings?.ffmpegPath) {
@@ -350,6 +397,7 @@ export async function transcribeAudio(
           { providerId: p.id, modelId },
           language,
           signal,
+          options,
         );
     }
   }

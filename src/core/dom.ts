@@ -46,6 +46,7 @@ export function sendCheck(
   threadId: string,
   latest: string | null,
   text: string,
+  contextBound = true,
 ) {
   const root = document.querySelector(profile.threadSelector);
   if (root?.getAttribute(profile.threadIdAttribute) !== threadId)
@@ -54,7 +55,8 @@ export function sendCheck(
     Array.from(root.querySelectorAll(profile.messageSelector))
       .at(-1)
       ?.getAttribute(profile.messageIdAttribute) ?? null;
-  if (last !== latest) throw new Error("Có tin mới; bản nháp đã hết hiệu lực.");
+  if (contextBound && last !== latest)
+    throw new Error("Có tin mới; bản nháp đã hết hiệu lực.");
   const composer = document.querySelector(profile.composerSelector) as
     HTMLInputElement | HTMLElement | null;
   const send = document.querySelector(

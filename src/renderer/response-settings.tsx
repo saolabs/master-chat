@@ -252,9 +252,8 @@ export function ResponseSettings({
           </p>
           <small>
             Kiểm tra xưng hô, độ dài, câu văn sáo và việc kéo chủ đề cũ vào tin
-            mới. Có thể sửa nháp rồi kiểm tra lại một lần. Khi kiểm tra thất bại
-            hoặc cần bạn quyết định, nháp được giữ để gửi thủ công. Bước này
-            thêm một hoặc hai lượt gọi AI.
+            mới. Tự sửa phản hồi khi có lưu ý. Trong chế độ tự động, kết quả
+            kiểm tra được lưu nhưng không yêu cầu duyệt thủ công.
           </small>
         </section>
         <section className="card">

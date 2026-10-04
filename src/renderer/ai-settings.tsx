@@ -126,7 +126,9 @@ export function AISettings({
                 <p className="provider-url">{p.baseUrl}</p>
                 <p>
                   {p.models.length} model đã chọn ·{" "}
-                  {p.hasApiKey ? "Đã lưu API key" : "Không có API key"}
+                  {p.hasApiKey
+                    ? `${p.apiKeyCount ?? 1} API key · đang dùng key ${(p.activeApiKeyIndex ?? 0) + 1}`
+                    : "Không có API key"}
                 </p>
                 <small>
                   {p.allowRemote
@@ -249,15 +251,26 @@ function ProviderEditor({
     const p = latest.find((p) => p.id === value.id);
     if (p) setCatalog(p.availableModels);
   }, [latest, value.id]);
+  const [newKeys, setNewKeys] = useState([""]);
+  const [removedKeys, setRemovedKeys] = useState<number[]>([]);
+  const savedProvider = latest.find((p) => p.id === value.id);
+  const keyCount =
+    savedProvider?.apiKeyCount ?? (savedProvider?.hasApiKey ? 1 : 0);
   async function save() {
     const result = await run({
       type: "provider.save",
-      provider: value,
+      provider: {
+        ...value,
+        apiKeys: newKeys.map((key) => key.trim()).filter(Boolean),
+      },
       clearApiKey: clearKey,
+      removeApiKeyIndexes: removedKeys,
     });
     if (result) {
       setValue((v) => ({ ...v, apiKey: "" }));
       setClearKey(false);
+      setNewKeys([""]);
+      setRemovedKeys([]);
       setSaved(true);
       if (!provider && result.data.ai.providers.some((p) => p.id === value.id))
         created?.(value.id);
@@ -351,30 +364,96 @@ function ProviderEditor({
             }}
           />
         </label>
-        <label>
-          API key
-          <input
-            type="password"
-            autoComplete="off"
-            value={value.apiKey}
-            onChange={(e) => setValue({ ...value, apiKey: e.target.value })}
-            placeholder={
-              latest.find((p) => p.id === value.id)?.hasApiKey
-                ? "Đã lưu key · để trống để giữ nguyên"
-                : "Không bắt buộc với server local"
+        <div className="provider-keys">
+          <h3>API key</h3>
+          <p className="hint">
+            Tự chuyển sang key tiếp theo khi hết credit hoặc lỗi kết nối/key, và
+            nhớ key cho lần sau. Mỗi lượt thử mỗi key tối đa một lần; sau key
+            cuối sẽ quay lại key đầu.
+          </p>
+          {!clearKey &&
+            Array.from({ length: keyCount }, (_, index) => (
+              <div className="inline" key={`saved-${index}`}>
+                <span>
+                  Key {index + 1} · đã mã hóa
+                  {index === (savedProvider?.activeApiKeyIndex ?? 0)
+                    ? " · đang dùng"
+                    : ""}
+                </span>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() =>
+                    setRemovedKeys((keys) =>
+                      keys.includes(index)
+                        ? keys.filter((key) => key !== index)
+                        : [...keys, index],
+                    )
+                  }
+                >
+                  {removedKeys.includes(index)
+                    ? `Giữ lại key ${index + 1}`
+                    : `Xóa key ${index + 1}`}
+                </button>
+              </div>
+            ))}
+          {newKeys.map((key, index) => (
+            <div className="inline" key={`new-${index}`}>
+              <label>
+                {keyCount
+                  ? `Thêm API key ${index + 1}`
+                  : `API key ${index + 1}`}
+                <input
+                  type="password"
+                  autoComplete="off"
+                  value={key}
+                  onChange={(e) =>
+                    setNewKeys((keys) =>
+                      keys.map((value, i) =>
+                        i === index ? e.target.value : value,
+                      ),
+                    )
+                  }
+                  placeholder={
+                    keyCount
+                      ? "Để trống để giữ các key đã lưu"
+                      : "Không bắt buộc với server local"
+                  }
+                />
+              </label>
+              {newKeys.length > 1 && (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() =>
+                    setNewKeys((keys) => keys.filter((_, i) => i !== index))
+                  }
+                >
+                  Bỏ key mới {index + 1}
+                </button>
+              )}
+            </div>
+          ))}
+          <button
+            type="button"
+            disabled={
+              busy || newKeys.length + keyCount - removedKeys.length >= 100
             }
-          />
-        </label>
-        {latest.find((p) => p.id === value.id)?.hasApiKey && (
-          <label className="check">
-            <input
-              type="checkbox"
-              checked={clearKey}
-              onChange={(e) => setClearKey(e.target.checked)}
-            />
-            Xóa API key đã lưu
-          </label>
-        )}
+            onClick={() => setNewKeys((keys) => [...keys, ""])}
+          >
+            + Thêm API key
+          </button>
+          {keyCount > 0 && (
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={clearKey}
+                onChange={(e) => setClearKey(e.target.checked)}
+              />
+              Xóa tất cả API key đã lưu
+            </label>
+          )}
+        </div>
         <div className="field-grid">
           <label className="check">
             <input
@@ -539,7 +618,7 @@ function TaskMatrix({
     [
       "default",
       "Model mặc định chung",
-      "Dùng cho các tác vụ chưa được gán model riêng.",
+      "Dùng cho tác vụ chưa gán model riêng và làm dự phòng khi model riêng lỗi.",
     ],
     ...TASKS,
   ];
@@ -559,8 +638,8 @@ function TaskMatrix({
     >
       <h3>Gán model theo tác vụ</h3>
       <p>
-        Model riêng ưu tiên hơn model mặc định. Mỗi lựa chọn gồm cả provider và
-        model.
+        Model riêng được dùng trước. Khi model riêng lỗi, ứng dụng thử model mặc
+        định chung trước khi báo lỗi. Mỗi lựa chọn gồm cả provider và model.
       </p>
       {rows.map(([role, name, description]) => {
         const choice = role === "default" ? value.default : value.tasks[role];

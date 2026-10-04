@@ -19,6 +19,14 @@
     "setup:speech": "bash scripts/setup-speech.sh"
   },
   "dependencies": {
+    "@tiptap/core": "^3.31.4",
+    "@tiptap/extension-document": "^3.31.4",
+    "@tiptap/extension-hard-break": "^3.31.4",
+    "@tiptap/extension-paragraph": "^3.31.4",
+    "@tiptap/extension-text": "^3.31.4",
+    "@tiptap/extensions": "^3.31.4",
+    "@tiptap/pm": "^3.31.4",
+    "@tiptap/react": "^3.31.4",
     "html-to-text": "^10.0.1",
     "lucide-react": "^1.52.0",
     "pdfjs-dist": "^6.4.299",

@@ -1,4 +1,11 @@
-import { app, BrowserWindow, ipcMain, dialog, safeStorage } from "electron";
+import {
+  app,
+  BrowserWindow,
+  ipcMain,
+  dialog,
+  safeStorage,
+  powerMonitor,
+} from "electron";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -17,6 +24,7 @@ import {
 } from "../src/core/ai-config.ts";
 import { threadIdentity } from "../src/core/urls.ts";
 import type { Command, DOMProfile, Snapshot } from "../src/core/types.ts";
+import { rememberProviderKey } from "./provider-keys.ts";
 import { saveProvider, updateAccount } from "../src/core/settings.ts";
 import { publicState } from "../src/core/types.ts";
 import { isDifferentReviewModel } from "../src/core/reply-quality.ts";
@@ -90,6 +98,7 @@ const providerSchema = z
     ]),
     baseUrl: z.string().min(1).max(2000),
     apiKey: z.string().max(4000),
+    apiKeys: z.array(z.string().trim().min(1).max(4000)).max(100).optional(),
     enabled: z.boolean(),
     allowRemote: z.boolean(),
     models: z.array(short).max(2000),
@@ -161,6 +170,16 @@ const commands = z.discriminatedUnion("type", [
     (type) => z.object({ type: z.literal(type), conversationId: id }).strict(),
   ),
   z.object({ type: z.literal("draft.discard"), draftId: id }).strict(),
+  z
+    .object({
+      type: z.literal("draft.review"),
+      draftId: id,
+      text: z.string().trim().min(1).max(5000),
+    })
+    .strict(),
+  z
+    .object({ type: z.literal("automation.all"), enabled: z.boolean() })
+    .strict(),
   z
     .object({
       type: z.literal("account.auto"),
@@ -244,6 +263,10 @@ const commands = z.discriminatedUnion("type", [
       type: z.literal("provider.save"),
       provider: providerSchema,
       clearApiKey: z.boolean().optional(),
+      removeApiKeyIndexes: z
+        .array(z.number().int().min(0).max(99))
+        .max(100)
+        .optional(),
     })
     .strict(),
   ...(["provider.models", "provider.test", "provider.remove"] as const).map(
@@ -326,6 +349,7 @@ function snapshot(): Snapshot {
     paused: engine.paused,
     pauseReason: engine.pauseReason,
     live: { ...engine.live },
+    replying: engine.replying,
     notice: engine.notice,
     monitors: structuredClone(engine.monitors),
   };
@@ -333,56 +357,62 @@ function snapshot(): Snapshot {
 async function execute(cmd: Command) {
   switch (cmd.type) {
     case "response.save":
-      engine.pause();
-      await vault.mutate((s) => {
-        const image = cmd.settings.media?.imageModel;
-        if (image)
-          resolveModel(
-            { ...s.ai, tasks: { ...s.ai.tasks, reply: image } },
-            "reply",
-          );
-        const audio = cmd.settings.media?.audioModel;
-        if (
-          audio &&
-          transcriptionMode(cmd.settings.media?.transcription, audio) ===
-            "provider"
-        )
-          validateTranscriptionSelection(s.ai, audio);
-        s.response = cmd.settings;
-        const reviewer = cmd.settings.review?.model;
-        if (reviewer && cmd.settings.review?.enabled !== false) {
-          resolveModel(
-            { ...s.ai, tasks: { ...s.ai.tasks, reply: reviewer } },
-            "reply",
-          );
+      await engine.configure(() =>
+        vault.mutate((s) => {
+          const image = cmd.settings.media?.imageModel;
+          if (image)
+            resolveModel(
+              { ...s.ai, tasks: { ...s.ai.tasks, reply: image } },
+              "reply",
+            );
+          const audio = cmd.settings.media?.audioModel;
           if (
-            (s.ai.tasks.reply || s.ai.default) &&
-            !isDifferentReviewModel(
-              resolveModel(s.ai, "reply").selection,
-              reviewer,
-            )
+            audio &&
+            transcriptionMode(cmd.settings.media?.transcription, audio) ===
+              "provider"
           )
-            throw new Error("Chọn model kiểm tra khác model viết câu trả lời.");
-        }
-      });
+            validateTranscriptionSelection(s.ai, audio);
+          s.response = cmd.settings;
+          const reviewer = cmd.settings.review?.model;
+          if (reviewer && cmd.settings.review?.enabled !== false) {
+            resolveModel(
+              { ...s.ai, tasks: { ...s.ai.tasks, reply: reviewer } },
+              "reply",
+            );
+            if (
+              (s.ai.tasks.reply || s.ai.default) &&
+              !isDifferentReviewModel(
+                resolveModel(s.ai, "reply").selection,
+                reviewer,
+              )
+            )
+              throw new Error(
+                "Chọn model kiểm tra khác model viết câu trả lời.",
+              );
+          }
+        }),
+      );
       engine.report(
-        "Đã lưu phong cách, media và nhịp trả lời. Bấm Tiếp tục để chạy tự động.",
+        engine.paused
+          ? "Đã lưu phong cách, media và nhịp trả lời. Tự trả lời vẫn đang tạm dừng."
+          : "Đã lưu phong cách, media và nhịp trả lời. Tự trả lời tiếp tục theo dõi.",
       );
       break;
     case "conversation.style":
-      engine.pause();
-      await vault.mutate((s) => {
-        const c = s.conversations.find((c) => c.id === cmd.conversationId);
-        if (!c) throw new Error("Hội thoại không tồn tại.");
-        c.responseStyle = cmd.style?.trim() || undefined;
-        c.learnStyle = cmd.learnStyle;
-        c.relationshipContext = cmd.relationshipContext?.trim() || undefined;
-        c.conversationDirection =
-          cmd.conversationDirection?.trim() || undefined;
-        for (const d of s.drafts)
-          if (d.conversationId === c.id && d.status === "draft")
-            d.status = "stale";
-      });
+      await engine.configure(() =>
+        vault.mutate((s) => {
+          const c = s.conversations.find((c) => c.id === cmd.conversationId);
+          if (!c) throw new Error("Hội thoại không tồn tại.");
+          c.responseStyle = cmd.style?.trim() || undefined;
+          c.learnStyle = cmd.learnStyle;
+          c.relationshipContext = cmd.relationshipContext?.trim() || undefined;
+          c.conversationDirection =
+            cmd.conversationDirection?.trim() || undefined;
+          for (const d of s.drafts)
+            if (d.conversationId === c.id && d.status === "draft")
+              d.status = "stale";
+        }),
+      );
       break;
     case "style.learn":
       await engine.learnConversationStyle(cmd.conversationId);
@@ -392,6 +422,12 @@ async function execute(cmd: Command) {
       break;
     case "account.auto":
       await engine.setAccountAuto(cmd.accountId, cmd.enabled);
+      break;
+    case "automation.all":
+      await engine.setAllAuto(cmd.enabled);
+      break;
+    case "draft.review":
+      await engine.recheckDraft(cmd.draftId, cmd.text);
       break;
     case "conversation.composing":
       engine.setComposing(cmd.conversationId, cmd.active);
@@ -405,19 +441,26 @@ async function execute(cmd: Command) {
     case "conversation.watch":
       engine.watchConversation(cmd.conversationId);
       break;
-    case "conversation.sync":
+    case "conversation.sync": {
+      const c = vault
+        .read()
+        .conversations.find((c) => c.id === cmd.conversationId);
+      if (!c) throw new Error("Hội thoại không tồn tại.");
+      browsers.invalidateSync(c.accountId);
       await engine.syncConversation(cmd.conversationId);
       break;
+    }
     case "conversation.backfill":
       await engine.backfillConversation(cmd.conversationId);
       break;
     case "account.discovery":
-      engine.pause();
-      await vault.mutate((s) => {
-        const a = s.accounts.find((a) => a.id === cmd.accountId);
-        if (!a) throw new Error("Tài khoản không tồn tại.");
-        a.autoDiscoverReply = cmd.enabled;
-      });
+      await engine.configure(() =>
+        vault.mutate((s) => {
+          const a = s.accounts.find((a) => a.id === cmd.accountId);
+          if (!a) throw new Error("Tài khoản không tồn tại.");
+          a.autoDiscoverReply = cmd.enabled;
+        }),
+      );
       break;
     case "profile.reset":
       engine.pause();
@@ -491,7 +534,12 @@ async function execute(cmd: Command) {
       // A blocked cloud provider can be saved, but cannot make requests until explicitly enabled.
       providerURL(cmd.provider, true);
       await vault.mutate((s) => {
-        saveProvider(s.ai, cmd.provider, cmd.clearApiKey);
+        saveProvider(
+          s.ai,
+          cmd.provider,
+          cmd.clearApiKey,
+          cmd.removeApiKeyIndexes,
+        );
       });
       engine.report(
         "Đã lưu provider. Tải danh sách model và chọn model sử dụng.",
@@ -501,7 +549,10 @@ async function execute(cmd: Command) {
     case "provider.models": {
       const p = vault.read().ai.providers.find((p) => p.id === cmd.providerId);
       if (!p) throw new Error("Provider không tồn tại.");
-      const models = await discoverModels(p);
+      const models = await discoverModels(p, {
+        onKeyChange: (provider, key) =>
+          rememberProviderKey(vault, provider, key),
+      });
       await vault.mutate((s) => {
         const current = s.ai.providers.find((x) => x.id === p.id);
         if (
@@ -522,9 +573,16 @@ async function execute(cmd: Command) {
       if (!modelId || !p.models.includes(modelId))
         throw new Error("Chọn ít nhất một model trước khi kiểm tra.");
       try {
-        await providerChat(p, { providerId: p.id, modelId }, [
-          { role: "user", content: "Chỉ trả lời OK." },
-        ]);
+        await providerChat(
+          p,
+          { providerId: p.id, modelId },
+          [{ role: "user", content: "Chỉ trả lời OK." }],
+          undefined,
+          {
+            onKeyChange: (provider, key) =>
+              rememberProviderKey(vault, provider, key),
+          },
+        );
         await vault.mutate((s) => {
           const current = s.ai.providers.find((x) => x.id === p.id);
           if (
@@ -562,12 +620,13 @@ async function execute(cmd: Command) {
       });
       break;
     case "ai.save":
-      engine.pause();
-      await vault.mutate((s) => {
-        const next = { ...s.ai, ...cmd.config };
-        validateSelections(next);
-        s.ai = next;
-      });
+      await engine.configure(() =>
+        vault.mutate((s) => {
+          const next = { ...s.ai, ...cmd.config };
+          validateSelections(next);
+          s.ai = next;
+        }),
+      );
       engine.report("Đã lưu model mặc định và model cho từng tác vụ.");
       break;
     case "profile.save": {
@@ -635,12 +694,7 @@ async function execute(cmd: Command) {
       break;
     }
     case "conversation.auto":
-      engine.pause();
-      await vault.mutate((s) => {
-        const c = s.conversations.find((c) => c.id === cmd.conversationId);
-        if (!c) throw new Error("Không có hội thoại.");
-        c.autoReply = cmd.enabled;
-      });
+      await engine.setConversationAuto(cmd.conversationId, cmd.enabled);
       break;
     case "knowledge.add":
     case "knowledge.update":
@@ -711,6 +765,12 @@ app.whenReady().then(async () => {
       engine?.pause(reason),
     );
     engine = new Engine(vault, browsers, changed);
+    const reconnect = () => {
+      browsers.invalidateSync();
+      void engine.refreshSync();
+    };
+    powerMonitor.on("resume", reconnect);
+    main.on("focus", () => void engine.refreshSync());
     ipcMain.handle("app:snapshot", (e) => {
       trusted(e);
       return snapshot();
@@ -763,6 +823,7 @@ app.whenReady().then(async () => {
       browsers.setBounds(bounds);
     });
     main.on("close", () => {
+      powerMonitor.removeListener("resume", reconnect);
       engine.shutdown();
       browsers.shutdown();
     });
@@ -772,6 +833,7 @@ app.whenReady().then(async () => {
     if (process.env.ELECTRON_RENDERER_URL)
       await main.loadURL(process.env.ELECTRON_RENDERER_URL);
     else await main.loadFile(path.join(__dirname, "../renderer/index.html"));
+    engine.startSync();
   } catch (e) {
     dialog.showErrorBox(
       "Không mở được Master Chat",

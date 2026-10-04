@@ -316,3 +316,52 @@ test("provider editing belongs to its card, cancels locally and keeps the select
   assert.ok(doc.querySelector('form[aria-label="Thêm provider"]'));
   assert.equal(doc.querySelector(".provider-card form"), null);
 });
+
+test("provider editor adds multiple masked keys and can remove one saved key without exposing secrets", async (t) => {
+  const state = emptyState();
+  state.ai.providers.push({
+    id: "p",
+    name: "Provider",
+    type: "ollama",
+    baseUrl: "http://127.0.0.1:11434/v1",
+    apiKey: "stored-secret-one",
+    apiKeys: ["stored-secret-one", "stored-secret-two"],
+    activeApiKeyIndex: 1,
+    enabled: true,
+    allowRemote: false,
+    models: ["one"],
+    availableModels: [],
+  });
+  const { dom, calls, click } = await mount(t, state);
+  await click("Chỉnh sửa");
+  const doc = dom.window.document;
+  assert.ok(!doc.body.innerHTML.includes("stored-secret"));
+  assert.match(doc.body.textContent!, /Key 2 · đã mã hóa · đang dùng/);
+  await click("Xóa key 1");
+  await click("+ Thêm API key");
+  const inputs = doc.querySelectorAll<HTMLInputElement>(
+    'input[type="password"]',
+  );
+  assert.equal(inputs.length, 2);
+  const setter = Object.getOwnPropertyDescriptor(
+    dom.window.HTMLInputElement.prototype,
+    "value",
+  )!.set!;
+  await act(async () => {
+    setter.call(inputs[0], "new-secret-one");
+    inputs[0].dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    setter.call(inputs[1], "new-secret-two");
+    inputs[1].dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+  });
+  await click("Lưu thay đổi");
+  const command = calls.at(-1);
+  assert.equal(command?.type, "provider.save");
+  if (command?.type === "provider.save") {
+    assert.equal(command.provider.apiKey, "");
+    assert.deepEqual(command.provider.apiKeys, [
+      "new-secret-one",
+      "new-secret-two",
+    ]);
+    assert.deepEqual(command.removeApiKeyIndexes, [0]);
+  }
+});

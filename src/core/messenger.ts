@@ -68,6 +68,7 @@ export type MessengerRead = {
   ambiguous: number;
   blocked: boolean;
   blockedReason?: string;
+  recoveryRequired?: boolean;
   revision: number;
 };
 export type NativeOptions = {
@@ -76,6 +77,7 @@ export type NativeOptions = {
   recipient?: string;
   scrollTop?: number;
   latest?: string | null;
+  contextBound?: boolean;
   text?: string;
   now?: number;
   messageId?: string;
@@ -136,6 +138,22 @@ export function messengerDOM(
         ? `Messenger có hộp thoại đang mở${dialog.getAttribute("aria-label") ? `: ${norm(dialog.getAttribute("aria-label")!).slice(0, 120)}` : "."}`
         : undefined;
   const blocked = Boolean(blockedReason);
+  const dialogTitle = dialog
+    ? plain(
+        `${dialog.getAttribute("aria-label") ?? ""} ${Array.from(
+          dialog.querySelectorAll('h1,h2,h3,[role="heading"]'),
+        )
+          .map((h) => h.textContent ?? "")
+          .join(" ")}`,
+      )
+    : "";
+  const recoveryRequired = Boolean(
+    authInput ||
+    /checkpoint|two_factor|two_step|challenge/.test(location.pathname) ||
+    /khoi phuc|restore|recovery|dong bo lich su|sync (?:your )?chat history|nhap (?:ma )?pin|enter (?:your )?pin|xac minh|verification/.test(
+      dialogTitle,
+    ),
+  );
   const hash = (s: string) => {
     let a = 2166136261,
       b = 2246822519,
@@ -185,6 +203,15 @@ export function messengerDOM(
     }
     return null;
   };
+  const moveScroll = (element: HTMLElement, top: number) => {
+    const before = element.scrollTop;
+    element.scrollTop = top;
+    const moved = element.scrollTop !== before;
+    // Detached Electron views may not paint a frame that emits scroll. Notify
+    // virtualized lists explicitly so their rendered rows follow the offset.
+    if (moved) element.dispatchEvent(new Event("scroll"));
+    return moved;
+  };
   if (
     action === "inbox" ||
     action === "scroll-inbox" ||
@@ -201,18 +228,19 @@ export function messengerDOM(
         ? (grid as HTMLElement)
         : null);
     if (action === "reset-inbox") {
-      if (scroll) scroll.scrollTop = 0;
+      if (scroll) moveScroll(scroll, 0);
       return true;
     }
     if (action === "seek-inbox") {
-      if (scroll) scroll.scrollTop = Math.max(0, options.scrollTop ?? 0);
+      if (scroll) moveScroll(scroll, Math.max(0, options.scrollTop ?? 0));
       return true;
     }
     if (action === "scroll-inbox") {
       if (!scroll) return false;
-      const before = scroll.scrollTop;
-      scroll.scrollTop += Math.max(250, scroll.clientHeight - 50);
-      return scroll.scrollTop > before;
+      return moveScroll(
+        scroll,
+        scroll.scrollTop + Math.max(250, scroll.clientHeight - 50),
+      );
     }
     const map = new Map<string, InboxThread>();
     for (const a of Array.from(
@@ -236,12 +264,35 @@ export function messengerDOM(
           label.split("\n")[0] ||
           `Hội thoại ${id}`,
       );
+      const snippets = Array.from(a.querySelectorAll('span[dir="auto"]'))
+        .filter((span) => !span.querySelector('span[dir="auto"]'))
+        .map((span) => norm(span.textContent ?? "").trim())
+        .filter(
+          (text) =>
+            text &&
+            text !== name &&
+            !/^(tin nhan chua doc|unread)$/.test(plain(text)),
+        );
+      const preview =
+        snippets.join(" ").slice(0, 500) ||
+        label
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(
+            (line) =>
+              line &&
+              line !== name &&
+              !/^(tin nhan chua doc|unread)$/.test(plain(line)),
+          )
+          .join(" ")
+          .slice(0, 500);
       map.set(id, {
         platformId: id,
         name: name.slice(0, 200),
         url: `${url.origin}${url.pathname}`,
         unread: /tin nhan chua doc|unread/.test(plain(label)),
         signature: hash(label),
+        preview: preview || undefined,
       });
     }
     return {
@@ -265,12 +316,13 @@ export function messengerDOM(
     scroll = scrollParent(first);
   if (action === "scroll-history") {
     if (!scroll) return false;
-    const before = scroll.scrollTop;
-    scroll.scrollTop -= Math.max(250, scroll.clientHeight - 50);
-    return scroll.scrollTop < before;
+    return moveScroll(
+      scroll,
+      scroll.scrollTop - Math.max(250, scroll.clientHeight - 50),
+    );
   }
   if (action === "scroll-latest") {
-    if (scroll) scroll.scrollTop = scroll.scrollHeight;
+    if (scroll) moveScroll(scroll, scroll.scrollHeight);
     return true;
   }
   const messages: NativeMessage[] = [];
@@ -492,6 +544,7 @@ export function messengerDOM(
     ambiguous,
     blocked,
     blockedReason,
+    recoveryRequired,
     revision: w.__masterChatDOM.revision,
   };
   if (action === "read") return result;
@@ -538,7 +591,10 @@ export function messengerDOM(
         if (!audio.paused) audio.pause();
     return attachment;
   }
-  if ((messages.at(-1)?.id ?? null) !== options.latest)
+  if (
+    options.contextBound !== false &&
+    (messages.at(-1)?.id ?? null) !== options.latest
+  )
     throw new Error("Có tin mới; bản nháp đã hết hiệu lực.");
   if (!composer) throw new Error("Không tìm thấy ô soạn Messenger.");
   const current = (composer.innerText || composer.textContent || "").trim();

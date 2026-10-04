@@ -42,7 +42,14 @@ export function reconcileInbox(
     if (thread.unread || c.lastInboxSignature !== thread.signature)
       priority.push(c.id);
     c.lastInboxSignature = thread.signature;
+    c.inboxPreview = thread.preview;
+    c.inboxUnread = thread.unread;
   }
+  const seen = scan.threads.map((t) => t.platformId);
+  account.inboxOrder = [
+    ...seen,
+    ...(account.inboxOrder ?? []).filter((id) => !seen.includes(id)),
+  ];
   account.inboxInitialized = true;
   return { added, priority };
 }

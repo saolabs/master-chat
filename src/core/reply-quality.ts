@@ -47,6 +47,35 @@ const verdictSchema = z
     text: z.string().trim().min(1).max(5000).optional(),
   })
   .strict();
+export const REVIEW_JSON_SCHEMA = {
+  type: "object",
+  properties: {
+    verdict: { type: "string", enum: ["approve", "revise", "hold"] },
+    issues: { type: "array", items: { type: "string" }, maxItems: 8 },
+    text: { type: "string" },
+  },
+  required: ["verdict", "issues"],
+  additionalProperties: false,
+};
+export function reviewFailure(error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  const http = message.match(/Provider trả HTTP (\d{3})/);
+  if (http)
+    return `Bộ kiểm tra trả HTTP ${http[1]}. ${http[1] === "404" ? "Model kiểm tra không có hoặc không dùng được với endpoint này." : http[1] === "429" ? "Provider đang giới hạn lượt gọi hoặc quota." : "Kiểm tra kết nối và quyền sử dụng model."}`;
+  if (message.includes("Không kết nối được provider"))
+    return "Không kết nối được model kiểm tra; kiểm tra mạng và endpoint.";
+  if (message.includes("AI trả nội dung rỗng hoặc quá dài"))
+    return "Model kiểm tra trả nội dung rỗng hoặc vượt giới hạn.";
+  if (message.includes("Provider hết giới hạn token"))
+    return "Model kiểm tra hết giới hạn token trước khi trả kết quả.";
+  if (message.includes("Provider chặn kết quả"))
+    return "Model kiểm tra chặn kết quả theo chính sách nội dung.";
+  if (message.includes("Model kiểm tra phải khác"))
+    return "Model kiểm tra phải khác model viết.";
+  if (message.includes("chưa cung cấp nội dung sửa"))
+    return "Model kiểm tra yêu cầu sửa nhưng không trả nội dung sửa.";
+  return "Model kiểm tra trả kết quả không hợp lệ hoặc cấu hình chưa sẵn sàng.";
+}
 export function parseReview(raw: string) {
   if (raw.length > 12000) throw new Error("Kết quả kiểm tra quá dài.");
   const parsed = verdictSchema.parse(
@@ -61,6 +90,6 @@ export function parseReview(raw: string) {
     throw new Error("Bộ kiểm tra chưa cung cấp nội dung sửa.");
   return parsed;
 }
-export function reviewBlocksAuto(review?: ReplyReview) {
+export function reviewNeedsAttention(review?: ReplyReview) {
   return review?.status === "held" || review?.status === "unavailable";
 }

@@ -14,6 +14,7 @@ export type Account = {
   inboxInitialized?: boolean;
   autoDiscoverReply?: boolean;
   monitorStartedAt?: number;
+  inboxOrder?: string[];
 };
 export type Message = {
   id: string;
@@ -105,6 +106,8 @@ export type Conversation = {
   discoveredAt?: number;
   diagnostics?: string;
   lastInboxSignature?: string;
+  inboxPreview?: string;
+  inboxUnread?: boolean;
   responseStyle?: string;
   learnStyle?: boolean;
   learnedStyle?: LearnedStyle;
@@ -143,6 +146,8 @@ export type AIProvider = {
   type: ProviderType;
   baseUrl: string;
   apiKey: string;
+  apiKeys?: string[];
+  activeApiKeyIndex?: number;
   enabled: boolean;
   allowRemote: boolean;
   models: string[];
@@ -162,7 +167,10 @@ export type AIConfig = {
   tasks: Record<Role, ModelSelection | null>;
 };
 export type PublicAIConfig = Omit<AIConfig, "providers"> & {
-  providers: (Omit<AIProvider, "apiKey"> & { hasApiKey: boolean })[];
+  providers: (Omit<AIProvider, "apiKey" | "apiKeys"> & {
+    hasApiKey: boolean;
+    apiKeyCount?: number;
+  })[];
 };
 export type Knowledge = {
   id: string;
@@ -244,9 +252,10 @@ export function publicState(state: State): PublicState {
     ),
     ai: {
       ...state.ai,
-      providers: state.ai.providers.map(({ apiKey, ...provider }) => ({
+      providers: state.ai.providers.map(({ apiKey, apiKeys, ...provider }) => ({
         ...provider,
-        hasApiKey: Boolean(apiKey),
+        hasApiKey: Boolean(apiKeys?.length || apiKey),
+        apiKeyCount: apiKeys?.length ?? (apiKey ? 1 : 0),
       })),
     },
   };
@@ -260,6 +269,7 @@ export type BrowserTab = {
   status: string;
 };
 export type Snapshot = {
+  replying?: string[];
   data: PublicState;
   tabs: BrowserTab[];
   paused: boolean;
@@ -278,6 +288,7 @@ export type InboxThread = {
   url: string;
   unread: boolean;
   signature: string;
+  preview?: string;
 };
 export type InboxScan = {
   threads: InboxThread[];
@@ -328,6 +339,8 @@ export type Command =
   | { type: "conversation.watch"; conversationId: string | null }
   | { type: "conversation.composing"; conversationId: string; active: boolean }
   | { type: "account.auto"; accountId: string; enabled: boolean }
+  | { type: "automation.all"; enabled: boolean }
+  | { type: "draft.review"; draftId: string; text: string }
   | {
       type: "conversation.send";
       conversationId: string;
@@ -338,6 +351,7 @@ export type Command =
       type: "provider.save";
       provider: Omit<AIProvider, "availableModels" | "testedAt" | "testStatus">;
       clearApiKey?: boolean;
+      removeApiKeyIndexes?: number[];
     }
   | {
       type: "provider.models" | "provider.test" | "provider.remove";

@@ -1,3 +1,4 @@
+import { activeKeyIndex, providerKeys } from "./provider-keys.ts";
 import type { AIConfig, AIProvider, Account } from "./types.ts";
 
 export function updateAccount(
@@ -39,20 +40,38 @@ export function saveProvider(
   config: AIConfig,
   input: Omit<AIProvider, "availableModels" | "testedAt" | "testStatus">,
   clearApiKey = false,
+  removeApiKeyIndexes: number[] = [],
 ) {
   const old = config.providers.find((p) => p.id === input.id);
   if (old && old.type !== input.type)
     throw new Error("Loại provider không được đổi khi sửa.");
-  const apiKey = clearApiKey ? "" : input.apiKey || old?.apiKey || "";
+  const oldKeys = old ? providerKeys(old) : [];
+  const retained = clearApiKey
+    ? []
+    : oldKeys.filter((_, index) => !removeApiKeyIndexes.includes(index));
+  const keys = providerKeys({
+    apiKey: "",
+    apiKeys: [
+      ...(input.apiKey.trim() ? [input.apiKey.trim()] : retained),
+      ...(input.apiKeys ?? []),
+    ],
+  });
+  if (keys.length > 100)
+    throw new Error("Mỗi provider chỉ lưu tối đa 100 API key.");
+  const apiKey = keys[0] ?? "";
+  const priorKey = oldKeys[old ? activeKeyIndex(old) : 0];
+  const activeApiKeyIndex = Math.max(0, keys.indexOf(priorKey));
   const endpointChanged =
     old &&
     (old.baseUrl !== input.baseUrl ||
-      apiKey !== old.apiKey ||
+      JSON.stringify(keys) !== JSON.stringify(oldKeys) ||
       old.allowRemote !== input.allowRemote);
   const provider: AIProvider = {
     ...input,
     models: [...new Set(input.models)],
     apiKey,
+    apiKeys: keys,
+    activeApiKeyIndex,
     availableModels: endpointChanged ? [] : (old?.availableModels ?? []),
     testedAt: endpointChanged ? undefined : old?.testedAt,
     testStatus: endpointChanged ? undefined : old?.testStatus,

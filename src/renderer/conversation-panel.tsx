@@ -2,7 +2,12 @@ import React, { useEffect, useRef, useState } from "react";
 import type { Command, Conversation, Snapshot } from "../core/types.ts";
 import { ContactProfilePanel } from "./contact-profile.tsx";
 import { messageContent } from "../core/response-style.ts";
-import { reviewBlocksAuto } from "../core/reply-quality.ts";
+import { Send, Sparkles, X, LoaderCircle, RefreshCw } from "lucide-react";
+import {
+  MessageEditor,
+  MAX_MESSAGE_LENGTH,
+  type MessageEditorHandle,
+} from "./message-editor.tsx";
 type Runner = (command: Command) => Promise<Snapshot | null>;
 export type ComposerState = {
   text: string;
@@ -46,7 +51,7 @@ export function ConversationPanel({
       )
     : c.messages;
   const visibleMessages = matches.slice(-historyLimit);
-  const composerInput = useRef<HTMLTextAreaElement>(null);
+  const composerInput = useRef<MessageEditorHandle>(null);
   const composerArea = useRef<HTMLFormElement>(null);
   const bodyArea = useRef<HTMLDivElement>(null);
   const submitting = useRef(false);
@@ -63,9 +68,7 @@ export function ConversationPanel({
     observer.observe(area);
     return () => observer.disconnect();
   }, []);
-  const [assistantOpen, setAssistantOpen] = useState(
-    () => window.matchMedia("(min-width: 1101px)").matches,
-  );
+  const [assistantOpen, setAssistantOpen] = useState(false);
   const drafts = snapshot.data.drafts.filter((d) => d.conversationId === c.id);
   const activeDrafts = drafts
     .filter((d) => d.status !== "sent" && d.status !== "stale")
@@ -74,6 +77,12 @@ export function ConversationPanel({
     .filter((d) => d.status === "sent" || d.status === "stale")
     .reverse();
   const linkedDraft = drafts.find((d) => d.id === composer.draftId);
+  const sidebarDrafts = activeDrafts.filter(
+    (d) =>
+      d.id !== composer.draftId ||
+      d.status === "sending" ||
+      d.status === "uncertain",
+  );
   const blockedSend = drafts.some(
     (d) => d.status === "sending" || d.status === "uncertain",
   );
@@ -84,7 +93,7 @@ export function ConversationPanel({
       linkedDraft.status === "sent"),
   );
   const readyDraft = activeDrafts.find(
-    (d) => d.status === "draft" && (!d.automatic || reviewBlocksAuto(d.review)),
+    (d) => d.status === "draft" && !d.automatic,
   );
   useEffect(() => {
     if (
@@ -117,7 +126,7 @@ export function ConversationPanel({
         return;
       }
       useDraft(draft);
-      if (sendAfterGenerate && !reviewBlocksAuto(draft.review)) {
+      if (sendAfterGenerate) {
         const sent = await run({
           type: "draft.send",
           draftId: draft.id,
@@ -136,25 +145,18 @@ export function ConversationPanel({
       submitting.current ||
       blockedSend ||
       staleDraft ||
+      composer.text.length > MAX_MESSAGE_LENGTH ||
       !composer.text.trim()
     )
       return;
     submitting.current = true;
     try {
-      const result = await run(
-        composer.draftId
-          ? {
-              type: "draft.send",
-              draftId: composer.draftId,
-              text: composer.text,
-            }
-          : {
-              type: "conversation.send",
-              conversationId: c.id,
-              text: composer.text,
-              basedOnId: c.messages.at(-1)?.id ?? null,
-            },
-      );
+      const result = await run({
+        type: "conversation.send",
+        conversationId: c.id,
+        text: composer.text,
+        basedOnId: c.messages.at(-1)?.id ?? null,
+      });
       if (result) {
         onComposerChange({ text: "" });
         followLatest.current = true;
@@ -207,12 +209,15 @@ export function ConversationPanel({
           </small>
         </div>
         <button
+          className="chat-sync"
+          aria-label="Đồng bộ tin mới"
+          title="Đồng bộ tin mới"
           disabled={busy}
           onClick={() =>
             void run({ type: "conversation.sync", conversationId: c.id })
           }
         >
-          Nạp lịch sử
+          <RefreshCw size={16} />
         </button>
         <button onClick={open}>Mở trình duyệt ↗</button>
         <button
@@ -242,15 +247,6 @@ export function ConversationPanel({
           />
           Tự động trả lời
         </label>
-        {c.autoReply && snapshot.paused && (
-          <button
-            className="reply-state"
-            title={snapshot.pauseReason}
-            onClick={() => void run({ type: "automation.resume" })}
-          >
-            Tự trả lời tạm dừng · Tiếp tục
-          </button>
-        )}
         {c.autoReply &&
           !snapshot.paused &&
           !(snapshot.data.ai.tasks.reply || snapshot.data.ai.default) && (
@@ -348,8 +344,8 @@ export function ConversationPanel({
               <div className="empty compact">
                 Chưa có lịch sử.
                 <p>
-                  Chọn Nạp lịch sử để lấy ngữ cảnh ban đầu. Tin lịch sử ban đầu
-                  không được tự động trả lời.
+                  Chọn Đồng bộ tin mới để lấy ngữ cảnh ban đầu. Tin lịch sử ban
+                  đầu không được tự động trả lời.
                 </p>
               </div>
             )}
@@ -363,7 +359,40 @@ export function ConversationPanel({
             }}
           >
             {linkedDraft?.review && (
-              <ReviewNotice review={linkedDraft.review} />
+              <>
+                <ReviewNotice review={linkedDraft.review} />
+                {linkedDraft.review.status === "unavailable" &&
+                  linkedDraft.status === "draft" && (
+                    <button
+                      className="review-retry"
+                      type="button"
+                      aria-label="Kiểm tra lại nháp"
+                      disabled={
+                        busy ||
+                        blockedSend ||
+                        staleDraft ||
+                        !composer.text.trim()
+                      }
+                      onClick={async () => {
+                        const result = await run({
+                          type: "draft.review",
+                          draftId: linkedDraft.id,
+                          text: composer.text,
+                        });
+                        const updated = result?.data.drafts.find(
+                          (d) => d.id === linkedDraft.id,
+                        );
+                        if (updated?.status === "draft")
+                          onComposerChange({
+                            text: updated.text,
+                            draftId: updated.id,
+                          });
+                      }}
+                    >
+                      <RefreshCw size={14} /> Kiểm tra lại nháp
+                    </button>
+                  )}
+              </>
             )}
             {composer.draftId && (
               <div className="composer-draft-label">
@@ -391,66 +420,82 @@ export function ConversationPanel({
                 </button>
               </div>
             )}
-            <div className="composer-row">
-              <textarea
+            <div
+              className="composer-surface"
+              aria-busy={busy || composer.generating}
+            >
+              <MessageEditor
+                key={c.id}
                 ref={composerInput}
-                aria-label={`Tin nhắn cho ${c.name}`}
+                label={`Tin nhắn cho ${c.name}`}
                 placeholder={`Nhập tin nhắn cho ${c.name}…`}
-                rows={3}
-                maxLength={5000}
                 value={composer.text}
                 disabled={busy || blockedSend}
-                onChange={(e) =>
-                  onComposerChange({ ...composer, text: e.target.value })
-                }
-                onKeyDown={(e) => {
-                  if (
-                    e.key === "Enter" &&
-                    !e.shiftKey &&
-                    !e.nativeEvent.isComposing &&
-                    e.keyCode !== 229
-                  ) {
-                    e.preventDefault();
-                    void sendMessage();
-                  }
-                }}
+                onChange={(text) => onComposerChange({ ...composer, text })}
+                onSend={() => void sendMessage()}
               />
-              <button
-                className="primary"
-                type="submit"
-                disabled={
-                  busy || blockedSend || staleDraft || !composer.text.trim()
-                }
-              >
-                {busy ? "Đang xử lý…" : "Gửi"}
-              </button>
-            </div>
-            <div className="composer-footer">
-              <small>
-                {composer.text.trim()
-                  ? "Tự trả lời chờ bạn hoàn tất tin đang soạn"
-                  : "Enter để gửi · Shift+Enter xuống dòng"}
-              </small>
-              <button
-                type="button"
-                disabled={
-                  busy ||
-                  blockedSend ||
-                  Boolean(composer.text.trim() && !composer.draftId)
-                }
-                onClick={() => void generateDraft()}
-              >
-                Tạo nháp AI
-              </button>
-              {composer.text && (
+              <div className="composer-toolbar">
                 <button
+                  className="composer-ai"
                   type="button"
-                  disabled={busy || blockedSend}
-                  onClick={() => void clearComposer()}
+                  disabled={
+                    busy ||
+                    blockedSend ||
+                    Boolean(composer.text.trim() && !composer.draftId)
+                  }
+                  onClick={() => void generateDraft()}
                 >
-                  Xóa nội dung
+                  {composer.generating ? (
+                    <LoaderCircle size={16} className="composer-spinner" />
+                  ) : (
+                    <Sparkles size={16} />
+                  )}
+                  {composer.generating ? "Đang tạo nháp…" : "Tạo nháp AI"}
                 </button>
-              )}
+                <div className="composer-toolbar-end">
+                  {composer.text.length >= 4500 && (
+                    <small
+                      className={
+                        composer.text.length > MAX_MESSAGE_LENGTH
+                          ? "composer-limit exceeded"
+                          : "composer-limit"
+                      }
+                      role="status"
+                    >
+                      {composer.text.length.toLocaleString("vi-VN")} / 5.000
+                    </small>
+                  )}
+                  <button
+                    className="composer-clear"
+                    type="button"
+                    title="Xóa nội dung"
+                    aria-label="Xóa nội dung"
+                    disabled={busy || blockedSend || !composer.text}
+                    onClick={() => void clearComposer()}
+                  >
+                    <X size={16} />
+                  </button>
+                  <button
+                    className="primary composer-send"
+                    type="submit"
+                    title="Gửi tin nhắn"
+                    aria-label="Gửi"
+                    disabled={
+                      busy ||
+                      blockedSend ||
+                      staleDraft ||
+                      !composer.text.trim() ||
+                      composer.text.length > MAX_MESSAGE_LENGTH
+                    }
+                  >
+                    {busy ? (
+                      <LoaderCircle size={18} className="composer-spinner" />
+                    ) : (
+                      <Send size={18} />
+                    )}
+                  </button>
+                </div>
+              </div>
             </div>
           </form>
         </div>
@@ -520,21 +565,6 @@ export function ConversationPanel({
                     placeholder="Bạn muốn chủ động trao đổi điều gì?"
                   />
                 </details>
-                <button
-                  className="primary"
-                  disabled={
-                    busy ||
-                    blockedSend ||
-                    Boolean(composer.text.trim() && !composer.draftId)
-                  }
-                  onClick={() => void generateDraft()}
-                >
-                  {busy
-                    ? "Đang xử lý…"
-                    : goal.trim()
-                      ? "Tạo lời mở đầu"
-                      : "Tạo bản nháp"}
-                </button>
                 <label className="check">
                   <input
                     type="checkbox"
@@ -545,13 +575,13 @@ export function ConversationPanel({
                   Gửi ngay sau khi tạo nháp
                 </label>
               </div>
-              <div className="assistant-drafts">
-                <h3>
-                  Cần xử lý
-                  {activeDrafts.length > 0 ? ` · ${activeDrafts.length}` : ""}
-                </h3>
-                {activeDrafts.length ? (
-                  activeDrafts.map((d) => (
+              {sidebarDrafts.length > 0 && (
+                <div className="assistant-drafts">
+                  <h3>
+                    Cần xử lý
+                    {` · ${sidebarDrafts.length}`}
+                  </h3>
+                  {sidebarDrafts.map((d) => (
                     <DraftEditor
                       key={d.id}
                       draft={d}
@@ -559,11 +589,9 @@ export function ConversationPanel({
                       disabled={busy}
                       useDraft={() => useDraft(d)}
                     />
-                  ))
-                ) : (
-                  <p className="assistant-empty">Chưa có bản nháp cần xử lý.</p>
-                )}
-              </div>
+                  ))}
+                </div>
+              )}
               {archivedDrafts.length > 0 && (
                 <details className="assistant-archive">
                   <summary>Lịch sử AI · {archivedDrafts.length}</summary>
@@ -685,8 +713,8 @@ function ReviewNotice({
   const labels = {
     approved: "Đã kiểm tra độ tự nhiên",
     revised: "Đã chỉnh và kiểm tra lại",
-    held: "Cần bạn xem lại · không tự gửi",
-    unavailable: "Chưa kiểm tra được · không tự gửi",
+    held: "Kiểm tra còn lưu ý",
+    unavailable: "Chưa kiểm tra được",
     skipped: "Chưa kiểm tra bằng model khác",
   };
   return (

@@ -69,6 +69,47 @@ test("outgoing clears older pending but later incoming remains eligible", () => 
   ingest(c, [message(3, "outgoing"), message(4)], 0);
   assert.deepEqual(c.pendingIds, ["4"]);
 });
+test("overlapping reads repair mixed-time history without making old context the newest message", () => {
+  const c = conversation();
+  ingest(c, [message(4, "outgoing"), message(5)], 0);
+  ingest(
+    c,
+    [
+      message(1, "incoming", null),
+      message(2),
+      message(4, "outgoing"),
+      message(5),
+    ],
+    0,
+  );
+  assert.deepEqual(
+    c.messages.map((m) => m.id),
+    ["1", "2", "4", "5"],
+  );
+  assert.deepEqual(c.pendingIds, []);
+  ingest(c, [message(2), message(3)], 0);
+  assert.deepEqual(
+    c.messages.map((m) => m.id),
+    ["1", "2", "3", "4", "5"],
+  );
+  assert.deepEqual(c.pendingIds, []);
+  c.messages = [c.messages[4], ...c.messages.slice(0, 4)];
+  ingest(
+    c,
+    [
+      message(1, "incoming", null),
+      message(2),
+      message(3),
+      message(4, "outgoing"),
+      message(5),
+    ],
+    0,
+  );
+  assert.deepEqual(
+    c.messages.map((m) => m.id),
+    ["1", "2", "3", "4", "5"],
+  );
+});
 test("nine messages need no summary; rank ten is covered exactly once", () => {
   const c = conversation();
   ingest(

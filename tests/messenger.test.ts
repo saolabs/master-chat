@@ -321,6 +321,38 @@ const scan = (id = "123") => ({
     },
   ],
 });
+test("inbox preview and native order update before history reads; unseen partial rows remain", () => {
+  const s = stateFixture();
+  const first = scan();
+  first.threads.push({ ...first.threads[0], platformId: "456" });
+  reconcileInbox(s, "a", first);
+  reconcileInbox(s, "a", {
+    ...scan("456"),
+    coverage: "partial",
+    threads: [
+      { ...scan("456").threads[0], signature: "new", preview: "New incoming" },
+    ],
+  });
+  assert.deepEqual(s.accounts[0].inboxOrder, ["456", "123"]);
+  assert.equal(s.conversations[1].inboxPreview, "New incoming");
+  assert.equal(s.conversations[1].inboxUnread, true);
+  assert.equal(s.conversations[1].messages.length, 0);
+  assert.deepEqual(s.conversations[1].pendingIds, []);
+});
+
+test("semantic inbox snippets retain preview without turning unread labels into messages", () => {
+  const { d, run } = fixture();
+  try {
+    d.window.document
+      .querySelector("a[aria-current]")!
+      .insertAdjacentHTML("beforeend", '<span dir="auto">Tin mới</span>');
+    const inbox = run("inbox");
+    assert.equal(inbox.threads[0].preview, "Tin mới");
+    assert.equal(inbox.threads[0].unread, true);
+  } finally {
+    d.window.close();
+  }
+});
 test("first inbox scan creates baseline with auto off; repeat and same thread across accounts are isolated", () => {
   const s = stateFixture();
   assert.equal(reconcileInbox(s, "a", scan()).added.length, 1);
@@ -460,12 +492,41 @@ test("hidden dialogs and login controls do not block a ready Messenger page", ()
     d.window.document.body.append(visibleDialog);
     const result = run("read");
     assert.equal(result.blocked, true);
+    assert.equal(result.recoveryRequired, true);
     assert.match(result.blockedReason, /Khôi phục lịch sử chat/);
     assert.throws(
       () =>
         run("preflight", { threadId: "123", latest: result.messages[0].id }),
       /xác minh/,
     );
+  } finally {
+    d.window.close();
+  }
+});
+
+test("loading and ordinary modals block sending without being classified as authentication recovery", () => {
+  const { d, run } = fixture();
+  try {
+    const dialog = d.window.document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    dialog.innerHTML = "<h2>Đang tải tin nhắn...</h2><button>Đóng</button>";
+    d.window.document.body.append(dialog);
+    const loading = run("read");
+    assert.equal(loading.blocked, true);
+    assert.equal(loading.recoveryRequired, false);
+    assert.throws(
+      () =>
+        run("preflight", {
+          threadId: "123",
+          recipient: "Tôi là DEV",
+          latest: loading.messages[0].id,
+        }),
+      /xác minh/,
+    );
+    dialog.innerHTML = "<h2>Tùy chọn hội thoại</h2>";
+    assert.equal(run("read").recoveryRequired, false);
+    dialog.innerHTML = "<h2>Nhập mã PIN để khôi phục đoạn chat</h2>";
+    assert.equal(run("read").recoveryRequired, true);
   } finally {
     d.window.close();
   }

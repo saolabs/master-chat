@@ -11,6 +11,7 @@ import "./styles.css";
 import { AISettings } from "./ai-settings.tsx";
 import { AccountSettings } from "./account-settings.tsx";
 import { KnowledgeSettings } from "./knowledge-settings.tsx";
+import { InboxControls, InboxRows } from "./inbox-controls.tsx";
 import {
   ConversationPanel,
   type ComposerState,
@@ -244,6 +245,9 @@ function App() {
       </aside>
       <div className="workspace">
         <div className="app-toolbar">
+          <InboxControls snapshot={snapshot} busy={busy} run={run} />
+        </div>
+        <div className="activity-bar">
           <button
             className="activity-toggle"
             aria-expanded={activityOpen}
@@ -253,31 +257,6 @@ function App() {
             <span>{snapshot.notice || "Hoạt động gần đây"}</span>
             <span aria-hidden="true">{activityOpen ? "⌃" : "⌄"}</span>
           </button>
-          <div className="controls">
-            <span
-              className={`status ${snapshot.paused ? "paused" : "running"}`}
-            >
-              <i />
-              {snapshot.paused ? "Đã tạm dừng" : "Đang theo dõi"}
-            </span>
-            <button
-              className="primary"
-              onClick={() =>
-                void run({
-                  type:
-                    snapshot.paused && !busy
-                      ? "automation.resume"
-                      : "automation.pause",
-                })
-              }
-            >
-              {snapshot.paused
-                ? busy
-                  ? "■ Dừng xử lý"
-                  : "▶ Tiếp tục"
-                : "Ⅱ Tạm dừng"}
-            </button>
-          </div>
         </div>
         {activityOpen && (
           <div className="activity-panel" role="status">
@@ -386,7 +365,7 @@ function App() {
                               })
                             }
                           >
-                            Bật tự trả lời toàn bộ
+                            Bật và chạy tài khoản
                           </button>
                           <button
                             disabled={busy}
@@ -401,11 +380,6 @@ function App() {
                             Tắt toàn bộ
                           </button>
                         </div>
-                        <p className="footnote">
-                          Áp dụng cho hội thoại hiện có và mới của tài khoản
-                          này. Bấm Tiếp tục để AI trả lời tin mới trong nền,
-                          không cần mở từng hội thoại.
-                        </p>
                       </div>
                     );
                   })}
@@ -424,26 +398,11 @@ function App() {
                   </div>
                   <div className="conversation-items">
                     {data.conversations.length ? (
-                      data.conversations.map((c) => (
-                        <button
-                          key={c.id}
-                          className={
-                            conversation?.id === c.id
-                              ? "conversation selected"
-                              : "conversation"
-                          }
-                          onClick={() => setSelected(c.id)}
-                        >
-                          <span className="avatar">{c.name.slice(0, 1)}</span>
-                          <div>
-                            <b>{c.name}</b>
-                            <small>
-                              {c.messages.at(-1)?.text || "Chưa nạp lịch sử"}
-                            </small>
-                          </div>
-                          <i className={c.autoReply ? "dot green" : "dot"} />
-                        </button>
-                      ))
+                      <InboxRows
+                        snapshot={snapshot}
+                        selected={conversation?.id}
+                        select={setSelected}
+                      />
                     ) : (
                       <div className="empty compact">
                         Chưa có hội thoại.

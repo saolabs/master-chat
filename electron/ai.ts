@@ -1,3 +1,8 @@
+import {
+  withProviderKeys,
+  providerHTTPError,
+  type KeyOptions,
+} from "./provider-keys.ts";
 import { transcribeAudio } from "./transcription.ts";
 import type { TranscriptionSettings } from "../src/core/types.ts";
 import type {
@@ -15,7 +20,13 @@ export type ChatMessage = {
   role: "system" | "user" | "assistant";
   content: string | MediaPart[];
 };
-type ChatOptions = { cacheInstructions?: boolean };
+export type ChatOptions = KeyOptions & {
+  maxContentLength?: number;
+  validateResponse?: (content: string) => void;
+  onModelUsed?: (selection: ModelSelection) => void;
+  cacheInstructions?: boolean;
+  jsonSchema?: Record<string, unknown>;
+};
 const instructionCaches = new Map<string, { name?: string; until: number }>();
 const textContent = (content: ChatMessage["content"]) =>
   typeof content === "string"
@@ -58,16 +69,17 @@ async function request(
     });
   } catch (e) {
     if (signal?.aborted) throw e;
-    throw new Error(
-      "Không kết nối được provider. Kiểm tra Base URL, server và mạng.",
+    throw Object.assign(
+      new Error(
+        "Không kết nối được provider. Kiểm tra Base URL, server và mạng.",
+      ),
+      { retryKey: true },
     );
   }
   if (!response.ok)
-    throw Object.assign(
-      new Error(
-        `Provider trả HTTP ${response.status}${response.status === 401 || response.status === 403 ? " · Kiểm tra API key/quyền truy cập." : ""}`,
-      ),
-      { status: response.status },
+    throw await providerHTTPError(
+      response,
+      `Provider trả HTTP ${response.status}${response.status === 401 || response.status === 403 ? " · Kiểm tra API key/quyền truy cập." : ""}`,
     );
   try {
     return await response.json();
@@ -75,7 +87,7 @@ async function request(
     throw new Error("Provider trả JSON không hợp lệ.");
   }
 }
-export async function providerChat(
+async function providerChatOnce(
   p: AIProvider,
   selection: ModelSelection,
   messages: ChatMessage[],
@@ -218,6 +230,12 @@ export async function providerChat(
           ),
         })),
       generationConfig: {
+        ...(options?.jsonSchema
+          ? {
+              responseMimeType: "application/json",
+              responseJsonSchema: options.jsonSchema,
+            }
+          : {}),
         ...(selection.temperature !== undefined
           ? { temperature: selection.temperature }
           : {}),
@@ -252,6 +270,22 @@ export async function providerChat(
       ?.filter((p: any) => !p.thought)
       .map((p: any) => p.text ?? "")
       .join("");
+    if (!content) {
+      const reason =
+        data.candidates?.[0]?.finishReason ?? data.promptFeedback?.blockReason;
+      if (
+        [
+          "SAFETY",
+          "RECITATION",
+          "BLOCKLIST",
+          "PROHIBITED_CONTENT",
+          "SPII",
+        ].includes(reason)
+      )
+        throw new Error("Provider chặn kết quả theo chính sách nội dung.");
+      if (reason === "MAX_TOKENS")
+        throw new Error("Provider hết giới hạn token trước khi trả nội dung.");
+    }
   } else {
     const data = await request(
       p,
@@ -323,6 +357,34 @@ export async function providerChat(
     throw new Error("AI trả nội dung rỗng hoặc quá dài.");
   return content.trim();
 }
+export async function providerChat(
+  provider: AIProvider,
+  selection: ModelSelection,
+  messages: ChatMessage[],
+  signal?: AbortSignal,
+  options?: ChatOptions,
+): Promise<string> {
+  if (!provider.enabled) throw new Error("Provider đang tắt.");
+  providerURL(provider, provider.allowRemote);
+  return withProviderKeys(
+    provider,
+    async (selected) => {
+      const result = await providerChatOnce(
+        selected,
+        selection,
+        messages,
+        signal,
+        options,
+      );
+      if (options?.maxContentLength && result.length > options.maxContentLength)
+        throw new Error("Nội dung AI quá dài.");
+      options?.validateResponse?.(result);
+      return result;
+    },
+    signal,
+    options,
+  );
+}
 // Engine entry point: every remote request requires permission on the selected provider.
 export async function localChat(
   config: AIConfig,
@@ -331,22 +393,61 @@ export async function localChat(
   signal?: AbortSignal,
   options?: ChatOptions,
 ): Promise<string> {
-  const { provider, selection } = resolveModel(config, role);
-  try {
-    return await providerChat(provider, selection, messages, signal, options);
-  } catch (error) {
-    if (signal?.aborted) throw error;
-    const task = {
-      summary: "Tóm tắt",
-      knowledge: "Tri thức",
-      reply: "Trả lời",
-    }[role];
-    throw new Error(
-      `${task} · ${selection.modelId}: ${error instanceof Error ? error.message : "Không gọi được AI."}`,
-    );
+  const task = { summary: "Tóm tắt", knowledge: "Tri thức", reply: "Trả lời" }[
+    role
+  ];
+  const primary = config.tasks[role] ?? config.default;
+  const fallback = config.default;
+  const choices = [primary];
+  if (
+    fallback &&
+    (!primary ||
+      primary.providerId !== fallback.providerId ||
+      primary.modelId !== fallback.modelId)
+  )
+    choices.push(fallback);
+  const keyOptions = { ...options, failedKeys: new Map<string, Set<string>>() };
+  const errors: string[] = [];
+  for (const choice of choices) {
+    signal?.throwIfAborted();
+    try {
+      const { provider, selection } = resolveModel(
+        { ...config, tasks: { ...config.tasks, [role]: choice } },
+        role,
+      );
+      const result = await providerChat(
+        provider,
+        selection,
+        messages,
+        signal,
+        keyOptions,
+      );
+      options?.onModelUsed?.(selection);
+      return result;
+    } catch (error) {
+      if (signal?.aborted || (error as Error)?.name === "AbortError")
+        throw error;
+      errors.push(
+        `${choice?.modelId ?? "Chưa chọn model"}: ${error instanceof Error ? error.message : "Không gọi được AI."}`,
+      );
+    }
   }
+  throw new Error(`${task} · ${errors.join(" · Dự phòng: ")}`);
 }
-export async function discoverModels(p: AIProvider): Promise<string[]> {
+
+export async function discoverModels(
+  p: AIProvider,
+  options?: KeyOptions,
+): Promise<string[]> {
+  providerURL(p, p.allowRemote);
+  return withProviderKeys(
+    p,
+    (selected) => discoverModelsOnce(selected),
+    undefined,
+    options,
+  );
+}
+async function discoverModelsOnce(p: AIProvider): Promise<string[]> {
   const ids: string[] = [];
   let cursor: string | undefined;
   for (let page = 0; page < 20; page++) {
@@ -396,18 +497,23 @@ export async function analyzeMedia(
   override?: ModelSelection | null,
   signal?: AbortSignal,
   transcription?: TranscriptionSettings,
+  options?: KeyOptions,
 ) {
   if (media.kind === "audio")
-    return transcribeAudio(config, media, override, signal, transcription);
-  const { provider, selection } = resolveModel(
-    override
-      ? { ...config, tasks: { ...config.tasks, reply: override } }
-      : config,
+    return transcribeAudio(
+      config,
+      media,
+      override,
+      signal,
+      transcription,
+      options,
+    );
+  const ai = override
+    ? { ...config, tasks: { ...config.tasks, reply: override } }
+    : config;
+  const result = await localChat(
+    ai,
     "reply",
-  );
-  const result = await providerChat(
-    provider,
-    selection,
     [
       {
         role: "system",
@@ -426,6 +532,7 @@ export async function analyzeMedia(
       },
     ],
     signal,
+    { ...options, maxContentLength: 20000 },
   );
   if (result.length > 20000)
     throw new Error("Nội dung phân tích media quá dài.");
