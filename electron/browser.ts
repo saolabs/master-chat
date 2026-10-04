@@ -224,6 +224,7 @@ export class Browsers {
         messengerPinScript("fill", a.recoveryPin),
       );
       if (result !== "submitted") return "blocked";
+      let readyChecks = 0;
       for (let n = 0; n < 24; n++) {
         await new Promise((resolve) => setTimeout(resolve, 250));
         if (wc.isDestroyed()) return "blocked";
@@ -231,14 +232,21 @@ export class Browsers {
           messengerPinScript("probe"),
         )) as PinProbe;
         if (next === "rejected") break;
-        if (next !== "absent") continue;
+        if (next !== "absent") {
+          readyChecks = 0;
+          continue;
+        }
         const read = (await this.native(wc, "read")) as MessengerRead;
         const inboxReady =
           /^\/messages\/?$/.test(new URL(wc.getURL()).pathname) &&
           (await wc.executeJavaScript(
             `Boolean(document.querySelector('[role="grid"] a[href*="/messages/"]'))`,
           ));
-        if (read.blocked || (!read.composerPresent && !inboxReady)) continue;
+        if (read.blocked || (!read.composerPresent && !inboxReady)) {
+          readyChecks = 0;
+          continue;
+        }
+        if (++readyChecks < 2) continue;
         await this.assertSession(wc, a);
         await this.vault.mutate((state) => {
           const current = state.accounts.find((x) => x.id === a.id);
@@ -246,6 +254,10 @@ export class Browsers {
             current.pinAutoFillBlocked = false;
         });
         this.loginStatus(wc, "Đã khôi phục lịch sử bằng PIN local");
+        const verification = [...this.entries.values()].find(
+          (entry) => entry.worker && entry.view.webContents === wc,
+        );
+        if (verification) this.close(verification.meta.id);
         this.changed();
         return "restored";
       }

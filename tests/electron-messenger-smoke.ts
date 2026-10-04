@@ -152,6 +152,79 @@ app.whenReady().then(async () => {
     await closed;
     assert.equal(worker.isDestroyed(), false);
     await b.readConversation(c);
+    // Real Chromium recovery UI: fill six cells once, remove the modal on accepted PIN.
+    state.accounts[0].recoveryPin = "012345";
+    state.accounts[0].autoRestorePin = true;
+    await worker.executeJavaScript(
+      `(()=>{window.pinEvents=0;const modal=document.createElement('div');modal.id='restore-pin';modal.setAttribute('role','dialog');modal.innerHTML='<h2>Nhập mã PIN để khôi phục đoạn chat của bạn</h2>'+Array.from({length:6},()=>'<input type="password" maxlength="1">').join('');modal.addEventListener('input',()=>{window.pinEvents++;const value=Array.from(modal.querySelectorAll('input')).map(i=>i.value).join('');if(value==='012345')modal.remove();});document.body.append(modal);})()`,
+    );
+    await b.readConversation(c);
+    assert.equal(await worker.executeJavaScript("window.pinEvents"), 6);
+    assert.equal(state.accounts[0].pinAutoFillBlocked, false);
+    assert.equal(
+      b
+        .list()
+        .some((tab) => tab.status === "Cần xử lý hộp thoại trong cửa sổ này"),
+      false,
+    );
+    // A rejected PIN is durably blocked, and concurrent calls share the same single attempt.
+    await worker.executeJavaScript(
+      `(()=>{window.pinEvents=0;const modal=document.createElement('div');modal.id='restore-pin';modal.setAttribute('role','dialog');modal.innerHTML='<h2>Nhập mã PIN để khôi phục đoạn chat của bạn</h2><input type="password" maxlength="6"><p></p>';modal.addEventListener('input',()=>{window.pinEvents++;modal.querySelector('p').textContent='Mã PIN không chính xác';});document.body.append(modal);})()`,
+    );
+    const restore = (
+      b as unknown as {
+        restorePin(wc: Electron.WebContents, a: Account): Promise<string>;
+      }
+    ).restorePin.bind(b);
+    assert.deepEqual(
+      await Promise.all([restore(worker, account), restore(worker, account)]),
+      ["blocked", "blocked"],
+    );
+    assert.equal(await worker.executeJavaScript("window.pinEvents"), 1);
+    assert.equal(state.accounts[0].pinAutoFillBlocked, true);
+    await worker.executeJavaScript(
+      `document.querySelector('#restore-pin input').value='';document.querySelector('#restore-pin p').textContent='';`,
+    );
+    assert.equal(await restore(worker, account), "blocked");
+    assert.equal(await worker.executeJavaScript("window.pinEvents"), 1);
+    const duplicate = new Browsers(
+      host,
+      vault,
+      () => {},
+      () => {},
+    );
+    const retryAfterRestart = (
+      duplicate as unknown as {
+        restorePin(wc: Electron.WebContents, a: Account): Promise<string>;
+      }
+    ).restorePin.bind(duplicate);
+    assert.equal(await retryAfterRestart(worker, account), "blocked");
+    assert.equal(await worker.executeJavaScript("window.pinEvents"), 1);
+    // Explicit opt-out does not fill even when a PIN has been stored.
+    state.accounts[0].pinAutoFillBlocked = false;
+    state.accounts[0].autoRestorePin = false;
+    assert.equal(await restore(worker, account), "blocked");
+    assert.equal(await worker.executeJavaScript("window.pinEvents"), 1);
+    await worker.executeJavaScript(
+      `document.querySelector('#restore-pin').remove()`,
+    );
+    // Saving a corrected PIN also resolves an already exposed worker and keeps its session alive.
+    await worker.executeJavaScript(
+      `(()=>{const modal=document.createElement('div');modal.id='restore-pin';modal.setAttribute('role','dialog');modal.innerHTML='<h2>Nhập mã PIN để khôi phục đoạn chat của bạn</h2><input type="password" maxlength="6">';modal.addEventListener('input',()=>{if(modal.querySelector('input').value==='012345')modal.remove();});document.body.append(modal);})()`,
+    );
+    await assert.rejects(b.readConversation(c), /Hoàn tất/);
+    const pinWindow = BrowserWindow.getAllWindows().find(
+      (win) => win !== host,
+    )!;
+    const pinClosed = new Promise<void>((resolve) =>
+      pinWindow.once("closed", () => resolve()),
+    );
+    state.accounts[0].autoRestorePin = true;
+    state.accounts[0].pinAutoFillBlocked = false;
+    assert.equal(await restore(worker, account), "restored");
+    await pinClosed;
+    assert.equal(worker.isDestroyed(), false);
+    await b.readConversation(c);
     await session.cookies.set({
       url: "https://www.facebook.com",
       name: "c_user",
@@ -161,7 +234,7 @@ app.whenReady().then(async () => {
     });
     await assert.rejects(b.readConversation(c), /Phiên Facebook không khớp/);
     console.log(
-      "Chromium fixture passed: inbox discovery, native read, CDP input event, send/echo, human draft, DOM drift and account identity guards.",
+      "Chromium fixture passed: inbox discovery, native read, CDP input event, send/echo, human draft, DOM drift, account identity guards, local PIN restoration and durable no-retry guard.",
     );
     b.shutdown();
     host.destroy();

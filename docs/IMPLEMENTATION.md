@@ -60,3 +60,14 @@ Thông báo cũ “Hội thoại đổi trong khi hoàn tất tải lịch sử�
 Nếu worker gặp hộp thoại/PIN thực sự, engine tạm dừng và hiện chính WebContents của worker trong cửa sổ riêng. Người dùng hoàn tất rồi đóng cửa sổ để nạp lại; đóng cửa sổ giữ worker và phiên trong bộ nhớ. Khi cửa sổ xác minh còn mở, đọc tự động và gửi đều bị chặn.
 
 68 kiểm thử Node đã qua, cùng typecheck, format check, production build và Chromium fixture. Fixture kiểm tra cả modal ẩn, modal hiện, chặn gửi trong cửa sổ xác minh và đọc lại sau khi đóng cửa sổ; không gửi Facebook thật.
+
+
+## PIN khôi phục Messenger local — 04/10/2026
+
+Theo lựa chọn trực tiếp của người dùng, PIN được lưu cùng credentials trong vault mã hóa trên máy và được phép nhập vào trang Messenger chính thức; không gửi cho AI hay dịch vụ khác. Snapshot chỉ trả hasRecoveryPin cùng trạng thái bật/tắt/chặn thử; không trả mã. Không thêm file plaintext, localStorage, telemetry hoặc API mạng cho PIN.
+
+Tài khoản → Sửa → PIN 6 chữ số → bật tự nhập → lưu. Để trống giữ PIN cũ; có lựa chọn xóa PIN. Tự nhập chỉ ở HTTPS Facebook /messages, đúng c_user của tài khoản, hộp thoại khôi phục PIN tiếng Việt/Anh, và control trống; không nhập mã OTP, tạo/đổi/reset PIN hay ghi đè thao tác thủ công. Hỗ trợ một input hoặc sáu ô maxlength=1, giữ số 0 đầu mã. Khôi phục thành công cần hộp thoại biến mất và nội dung Messenger sẵn sàng qua hai lần kiểm tra. Cửa sổ xác minh worker tự đóng sau thành công, giữ WebContents/session; không tự bật lại engine đang tạm dừng.
+
+Trước khi điền, app lưu cờ chặn thử vào vault: PIN sai, timeout hoặc tiến trình bị ngắt không được thử tự động liên tục, kể cả sau restart. Người dùng cần kiểm tra Messenger hoặc nhập lại PIN và lưu để thử lại. Exception có thể chứa script nên luồng PIN chỉ dùng trạng thái cố định, không log/hiển thị exception gốc.
+
+74 kiểm thử Node đạt, gồm vault roundtrip/không plaintext, snapshot bỏ PIN và kiểm tra payload summary/knowledge/reply không chứa PIN. Chromium fixture kiểm tra sáu ô, PIN sai, đồng thời nhiều lời gọi, chặn qua instance mới, opt-out và khôi phục cửa sổ worker. Đây là kiểm thử cục bộ bằng dữ liệu giả; chưa coi là chứng minh khôi phục Messenger thật bằng PIN của người dùng.

@@ -467,3 +467,38 @@ test("automatic send rechecks pending eligibility after refreshing account cutof
   assert.deepEqual(c.pendingIds, []);
   assert.equal(r.sent(), 0);
 });
+
+test("stored account PIN never enters summary, knowledge or reply AI requests", async (t) => {
+  const r = rig(),
+    old = globalThis.fetch,
+    bodies: string[] = [];
+  t.after(() => {
+    globalThis.fetch = old;
+    r.engine.shutdown();
+  });
+  r.state.accounts[0].recoveryPin = "098765";
+  r.state.accounts[0].autoRestorePin = true;
+  r.state.conversations[0].messages = Array.from({ length: 10 }, (_, n) => ({
+    ...r.state.conversations[0].messages[0],
+    id: `m${n}`,
+    text: `Hello ${n}`,
+  }));
+  r.state.knowledge.push({
+    id: "k",
+    title: "Hello",
+    text: "Hello facts",
+    accountId: "a",
+  });
+  globalThis.fetch = (async (_url, options) => {
+    bodies.push(String(options?.body));
+    return new Response(
+      JSON.stringify({ choices: [{ message: { content: "OK" } }] }),
+    );
+  }) as typeof fetch;
+  await r.engine.generate("c");
+  assert.equal(bodies.length, 3);
+  for (const body of bodies) {
+    assert.equal(body.includes("098765"), false);
+    assert.equal(body.includes("recoveryPin"), false);
+  }
+});

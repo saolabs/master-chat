@@ -209,3 +209,36 @@ test("vault reopening purges legacy fanpage accounts and associated data", async
   assert.equal(state.knowledge.length, 0);
   assert.equal("messenger-page" in state.profiles, false);
 });
+
+test("recovery PIN stays encrypted on disk and the attempt guard survives reopening", async (t) => {
+  const dir = await directory(t),
+    v = new Vault(dir, secrets);
+  await v.open();
+  await v.mutate((s) =>
+    s.accounts.push({
+      id: "a",
+      name: "A",
+      platform: "messenger-personal",
+      username: "",
+      password: "",
+      cookies: [],
+      recoveryPin: "098765",
+      autoRestorePin: true,
+      pinAutoFillBlocked: true,
+    }),
+  );
+  assert.equal(
+    (await readFile(path.join(dir, "data.vault"))).includes(
+      Buffer.from("098765"),
+    ),
+    false,
+  );
+  const reopened = new Vault(dir, secrets);
+  await reopened.open();
+  assert.equal(reopened.read().accounts[0].recoveryPin, "098765");
+  assert.equal(reopened.read().accounts[0].pinAutoFillBlocked, true);
+  assert.equal(
+    JSON.stringify(publicState(reopened.read())).includes("098765"),
+    false,
+  );
+});

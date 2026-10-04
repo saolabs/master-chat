@@ -114,5 +114,5 @@ export function messengerPin(action: "probe" | "fill", pin = ""): PinProbe {
 }
 
 export function messengerPinScript(action: "probe" | "fill", pin = "") {
-  return `(${messengerPin.toString()})(${JSON.stringify(action)},${JSON.stringify(pin)})`;
+  return `(() => {const __name=(value)=>value; return (${messengerPin.toString()})(${JSON.stringify(action)},${JSON.stringify(pin)});})()`;
 }
