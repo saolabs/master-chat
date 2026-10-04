@@ -1,0 +1,190 @@
+[
+  {
+    "provider": "gemini",
+    "models": [
+      {
+        "name": "gemini-3.8-flash",
+        "description": "Model text ổn định mới nhất cho agent, structured output và ngữ cảnh dài.",
+        "price_per_1m_token": {
+          "input": 15,
+          "output": 60
+        }
+      },
+      {
+        "name": "gemini-3.7-flash",
+        "description": "Model text Flash ổn định cho agent và structured output.",
+        "price_per_1m_token": {
+          "input": 15,
+          "output": 60
+        }
+      },
+      {
+        "name": "gemini-3.6-flash",
+        "description": "Model text Flash ổn định cho tác vụ agent và fallback.",
+        "price_per_1m_token": {
+          "input": 15,
+          "output": 60
+        }
+      },
+      {
+        "name": "gemini-3.5-flash",
+        "description": "Model text Flash ổn định, cân bằng chất lượng và tốc độ.",
+        "price_per_1m_token": {
+          "input": 15,
+          "output": 60
+        }
+      },
+      {
+        "name": "gemini-3.5-flash-lite",
+        "description": "Model text ổn định, ưu tiên chi phí cho tác vụ nhẹ và lưu lượng lớn.",
+        "price_per_1m_token": {
+          "input": 100,
+          "output": 400
+        }
+      },
+      {
+        "name": "gemini-3.1-flash-lite",
+        "description": "Model text Flash Lite ổn định, phù hợp tác vụ nhẹ và model dự phòng.",
+        "price_per_1m_token": {
+          "input": 100,
+          "output": 400
+        }
+      },
+      {
+        "name": "gemini-2.5-pro",
+        "description": "Model Pro ổn định cho suy luận phức tạp và đối soát độc lập.",
+        "price_per_1m_token": {
+          "input": 125,
+          "output": 500
+        }
+      },
+      {
+        "name": "gemini-2.5-flash",
+        "description": "Model Flash ổn định, tương thích rộng và phù hợp làm fallback/free-tier canary.",
+        "price_per_1m_token": {
+          "input": 15,
+          "output": 60
+        }
+      },
+      {
+        "name": "gemini-2.5-flash-lite",
+        "description": "Model Flash Lite ổn định, tương thích rộng và tối ưu chi phí.",
+        "price_per_1m_token": {
+          "input": 100,
+          "output": 400
+        }
+      },
+      {
+        "name": "gemini-3-pro-image",
+        "description": "Model sinh ảnh ổn định chất lượng cao; chỉ gán cho tác vụ Sinh ảnh.",
+        "price_per_1m_token": {
+          "input": 0,
+          "output": 0
+        }
+      },
+      {
+        "name": "gemini-3.1-flash-image",
+        "description": "Model sinh ảnh ổn định nhanh; chỉ gán cho tác vụ Sinh ảnh.",
+        "price_per_1m_token": {
+          "input": 0,
+          "output": 0
+        }
+      },
+      {
+        "name": "gemini-3.1-flash-lite-image",
+        "description": "Model sinh ảnh Flash Lite ổn định; chỉ gán cho tác vụ Sinh ảnh.",
+        "price_per_1m_token": {
+          "input": 0,
+          "output": 0
+        }
+      },
+      {
+        "name": "gemini-2.5-flash-image",
+        "description": "Model sinh ảnh Gemini 2.5 ổn định; chỉ gán cho tác vụ Sinh ảnh.",
+        "price_per_1m_token": {
+          "input": 0,
+          "output": 0
+        }
+      }
+    ]
+  },
+  {
+    "provider": "openai",
+    "models": [
+      {
+        "name": "gpt-4o",
+        "description": "High-intelligence flagship model for complex, multi-step tasks.",
+        "price_per_1m_token": {
+          "input": 500,
+          "output": 1500
+        }
+      },
+      {
+        "name": "gpt-4o-mini",
+        "description": "Affordable and fast model for everyday tasks.",
+        "price_per_1m_token": {
+          "input": 15,
+          "output": 60
+        }
+      },
+      {
+        "name": "o3-mini",
+        "description": "Fast, cost-efficient reasoning model for complex logic and coding.",
+        "price_per_1m_token": {
+          "input": 110,
+          "output": 440
+        }
+      }
+    ]
+  },
+  {
+    "provider": "anthropic",
+    "models": [
+      {
+        "name": "claude-opus-4-8",
+        "description": "Most powerful model for highly complex tasks.",
+        "price_per_1m_token": {
+          "input": 1500,
+          "output": 7500
+        }
+      },
+      {
+        "name": "claude-sonnet-4-6",
+        "description": "Ideal balance of intelligence and speed.",
+        "price_per_1m_token": {
+          "input": 300,
+          "output": 1500
+        }
+      },
+      {
+        "name": "claude-haiku-4-5-20251001",
+        "description": "Fastest and most compact model for near-instant responsiveness.",
+        "price_per_1m_token": {
+          "input": 80,
+          "output": 400
+        }
+      }
+    ]
+  },
+  {
+    "provider": "deepseek",
+    "models": [
+      {
+        "name": "deepseek-v4-flash",
+        "description": "DeepSeek-V4 fast model.",
+        "price_per_1m_token": {
+          "input": 14,
+          "output": 28
+        }
+      },
+      {
+        "name": "deepseek-v4-pro",
+        "description": "DeepSeek-V4 flagship model.",
+        "price_per_1m_token": {
+          "input": 43.5,
+          "output": 87
+        }
+      }
+    ]
+  }
+]

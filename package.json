@@ -1,0 +1,68 @@
+{
+  "name": "master-chat",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-first personal messaging assistant",
+  "author": "SaoLabs",
+  "license": "UNLICENSED",
+  "main": "out/main/main.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write electron src tests electron.vite.config.ts index.html tsconfig.json package.json",
+    "format:check": "prettier --check electron src tests electron.vite.config.ts index.html tsconfig.json package.json",
+    "test": "node --import tsx --test tests/*.test.ts tests/*.test.tsx",
+    "test:browser": "esbuild tests/electron-messenger-smoke.ts --bundle --platform=node --external:electron --format=cjs --outfile=out/tests/electron-messenger-smoke.cjs && electron out/tests/electron-messenger-smoke.cjs",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:win": "npm run build && electron-builder --win"
+  },
+  "dependencies": {
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@types/jsdom": "^30.0.0",
+    "@types/node": "^22.17.1",
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7",
+    "@vitejs/plugin-react": "^5.0.0",
+    "electron": "^43.3.0",
+    "electron-builder": "^26.0.12",
+    "electron-vite": "^4.0.0",
+    "esbuild": "^0.25.12",
+    "jsdom": "^29.1.1",
+    "prettier": "^3.9.9",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.2"
+  },
+  "build": {
+    "appId": "com.saolabs.master-chat",
+    "productName": "Master Chat",
+    "files": [
+      "out/**/*",
+      "!out/tests/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "icon": "build/icon.icns",
+      "category": "public.app-category.social-networking",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}
