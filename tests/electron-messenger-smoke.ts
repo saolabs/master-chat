@@ -46,14 +46,16 @@ app.whenReady().then(async () => {
       domain: ".facebook.com",
       secure: true,
     });
-    session.protocol.handle(
-      "https",
-      () =>
-        new Response(
-          `<!doctype html><meta charset="utf-8"><style>body{font-family:sans-serif} [role=button],button,[contenteditable]{display:block;min-height:30px} [contenteditable]{border:1px solid gray} </style><div role="grid" aria-label="Đoạn chat"><div role="row"><a aria-current="page" href="/messages/t/123/"><span dir="auto">Fixture Recipient</span><span>Tin nhắn chưa đọc</span></a></div></div><section id="timeline"><div role="article"><time datetime="${new Date().toISOString()}"></time><div role="button" aria-label="Nhập, Tin nhắn do Fixture Recipient gửi lúc 10:19: Test incoming"></div></div></section><div contenteditable="true" role="textbox" aria-label="Viết cho Fixture Recipient"></div><button aria-label="Gửi lượt thích" id="like"></button><button aria-label="Nhấn Enter để gửi" id="send"></button><script>window.inputs=0;window.sends=0;window.likes=0;const composer=document.querySelector('[contenteditable]');composer.addEventListener('input',()=>window.inputs++);document.querySelector('#like').onclick=()=>window.likes++;document.querySelector('#send').onclick=()=>{window.sends++;const article=document.createElement('div');article.setAttribute('role','article');const time=document.createElement('time');time.setAttribute('datetime',new Date().toISOString());article.append(time);const node=document.createElement('div');node.setAttribute('role','button');node.setAttribute('aria-label','Nhập, Tin nhắn do Bạn gửi lúc 10:20: '+composer.textContent);article.append(node);document.querySelector('#timeline').append(article);composer.textContent='';};</script>`,
-          { headers: { "content-type": "text/html;charset=utf-8" } },
-        ),
-    );
+    session.protocol.handle("https", (request) => {
+      if (new URL(request.url).hostname === "scontent.fbcdn.net")
+        return new Response(new Uint8Array([1, 2, 3]), {
+          headers: { "content-type": "image/png" },
+        });
+      return new Response(
+        `<!doctype html><meta charset="utf-8"><style>body{font-family:sans-serif} [role=button],button,[contenteditable]{display:block;min-height:30px} [contenteditable]{border:1px solid gray} </style><div role="grid" aria-label="Đoạn chat"><div role="row"><a aria-current="page" href="/messages/t/123/"><span dir="auto">Fixture Recipient</span><span>Tin nhắn chưa đọc</span></a></div></div><section id="timeline"><div role="article"><time datetime="${new Date().toISOString()}"></time><div role="button" aria-label="Nhập, Tin nhắn do Fixture Recipient gửi lúc 10:19: Test incoming"></div></div></section><div contenteditable="true" role="textbox" aria-label="Viết cho Fixture Recipient"></div><button aria-label="Gửi lượt thích" id="like"></button><button aria-label="Nhấn Enter để gửi" id="send"></button><script>window.inputs=0;window.sends=0;window.likes=0;const composer=document.querySelector('[contenteditable]');composer.addEventListener('input',()=>window.inputs++);document.querySelector('#like').onclick=()=>window.likes++;document.querySelector('#send').onclick=()=>{window.sends++;const article=document.createElement('div');article.setAttribute('role','article');const time=document.createElement('time');time.setAttribute('datetime',new Date().toISOString());article.append(time);const node=document.createElement('div');node.setAttribute('role','button');node.setAttribute('aria-label','Nhập, Tin nhắn do Bạn gửi lúc 10:20: '+composer.textContent);article.append(node);document.querySelector('#timeline').append(article);composer.textContent='';};</script>`,
+        { headers: { "content-type": "text/html;charset=utf-8" } },
+      );
+    });
     const scan = await b.scanInbox(account.id);
     assert.equal(scan.threads.length, 1);
     assert.equal(scan.threads[0].name, "Fixture Recipient");
@@ -225,6 +227,83 @@ app.whenReady().then(async () => {
     await pinClosed;
     assert.equal(worker.isDestroyed(), false);
     await b.readConversation(c);
+    // Live view remains pinned to the selected thread while the send/history worker visits another.
+    const liveInitial = await b.readLiveConversation(c);
+    assert.equal(liveInitial[0].text, "Test incoming");
+    const liveView = (
+      b as unknown as { liveViews: Map<string, Electron.WebContentsView> }
+    ).liveViews.get(account.id)!.webContents;
+    await liveView.executeJavaScript(
+      `(()=>{const article=document.createElement('div');article.setAttribute('role','article');article.innerHTML='<time datetime="'+new Date().toISOString()+'"></time><div role="button" aria-label="Nhập, Tin nhắn do Fixture Recipient gửi lúc 10:22: Live fixture incoming"></div>';document.querySelector('#timeline').append(article);})()`,
+    );
+    await worker.executeJavaScript(
+      `history.replaceState(null,'','/messages/t/999/')`,
+    );
+    const liveNew = await b.readLiveConversation(c);
+    assert.equal(liveNew.at(-1)?.text, "Live fixture incoming");
+    assert.ok(worker.getURL().includes("/999/"));
+    assert.ok(liveView.getURL().includes("/123/"));
+    await worker.executeJavaScript(
+      `history.replaceState(null,'','/messages/t/123/')`,
+    );
+    // Media is read through the same isolated account session; page blobs stay in their owning WebContents.
+    await worker.executeJavaScript(
+      `(()=>{const timeline=document.querySelector('#timeline');const photo=document.createElement('div');photo.setAttribute('role','article');photo.setAttribute('data-message-id','fixture-photo');photo.innerHTML='<time datetime="'+new Date().toISOString()+'"></time><div role="button" aria-label="Tin nhắn do Fixture Recipient gửi lúc 10:23: Ảnh"><img alt="Ảnh được gửi" width="180" src="https://scontent.fbcdn.net/fixture.png"></div>';timeline.append(photo);const voice=document.createElement('div');voice.setAttribute('role','article');voice.setAttribute('data-message-id','fixture-voice');voice.innerHTML='<time datetime="'+new Date().toISOString()+'"></time><div role="button" aria-label="Tin nhắn do Fixture Recipient gửi lúc 10:24: Tin nhắn thoại"></div><audio></audio>';voice.querySelector('audio').src=URL.createObjectURL(new Blob([new Uint8Array([4,5,6])],{type:'audio/mp4'}));timeline.append(voice);})()`,
+    );
+    const mediaRead = await b.readConversation(c);
+    const photo = mediaRead.find((m) => m.id === "fixture-photo")!,
+      voice = mediaRead.find((m) => m.id === "fixture-voice")!;
+    assert.equal(
+      (await b.readAttachment(c, photo.id, photo.attachments![0].id)).data,
+      "AQID",
+    );
+    const voicePayload = await b.readAttachment(
+      c,
+      voice.id,
+      voice.attachments![0].id,
+    );
+    assert.equal(voicePayload.data, "BAUG");
+    assert.equal(voicePayload.mimeType, "audio/mp4");
+    // Current Messenger can omit aria-current. A rendered recipient region +
+    // composer + unique inbox URL still binds the thread; stale regions do not.
+    const noMarker = `(()=>{document.querySelector('a[aria-current]').removeAttribute('aria-current');const region=document.createElement('section');region.setAttribute('aria-label','Cuộc trò chuyện với Fixture Recipient');for(const node of [...document.querySelectorAll('#timeline,[contenteditable],button')])region.append(node);document.body.append(region);})()`;
+    await worker.executeJavaScript(noMarker);
+    await liveView.executeJavaScript(noMarker);
+    const noMarkerRead = await b.readConversation(c);
+    await b.send(
+      c,
+      undefined,
+      "No marker fixture reply",
+      noMarkerRead.at(-1)!.id,
+      () => true,
+    );
+    assert.equal(
+      (await b.readConversation(c)).at(-1)?.text,
+      "No marker fixture reply",
+    );
+    assert.equal(
+      (await b.readLiveConversation(c)).at(-1)?.text,
+      "Live fixture incoming",
+    );
+    // Explicit history import keeps more than the normal recent read window.
+    await b.readConversation(c);
+    await worker.executeJavaScript(
+      `(()=>{const timeline=document.querySelector('#timeline');timeline.innerHTML='';for(let n=0;n<120;n++){const article=document.createElement('div');article.setAttribute('role','article');article.innerHTML='<time datetime="'+new Date(Date.now()-120000+n*1000).toISOString()+'"></time><div role="button" aria-label="Nhập, Tin nhắn do Fixture Recipient gửi lúc 10:22: History '+n+'"></div>';timeline.append(article);}})()`,
+    );
+    const olderHistory = await b.readHistory(c);
+    assert.equal(olderHistory.length, 120);
+    assert.equal(olderHistory[0].text, "History 0");
+    assert.equal(olderHistory.at(-1)?.text, "History 119");
+    const aborted = new AbortController();
+    aborted.abort();
+    await assert.rejects(b.readHistory(c, undefined, aborted.signal));
+    await worker.executeJavaScript(
+      `document.querySelector('section[aria-label]').setAttribute('aria-label','Cuộc trò chuyện với Someone else')`,
+    );
+    await assert.rejects(
+      b.send(c, undefined, "Stale recipient fixture", null, () => true),
+      /Sai hội thoại/,
+    );
     await session.cookies.set({
       url: "https://www.facebook.com",
       name: "c_user",
@@ -234,7 +313,7 @@ app.whenReady().then(async () => {
     });
     await assert.rejects(b.readConversation(c), /Phiên Facebook không khớp/);
     console.log(
-      "Chromium fixture passed: inbox discovery, native read, CDP input event, send/echo, human draft, DOM drift, account identity guards, local PIN restoration and durable no-retry guard.",
+      "Chromium fixture passed: inbox discovery, native read, CDP input event, send/echo, human draft, DOM drift, account identity guards, image/session fetch, voice/blob fetch, deep history import, local PIN restoration and durable no-retry guard.",
     );
     b.shutdown();
     host.destroy();

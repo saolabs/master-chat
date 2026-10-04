@@ -7,8 +7,10 @@ import type {
   ModelSelection,
   Role,
   ProviderType,
+  ResponseSettings as ResponseConfig,
 } from "../core/types.ts";
 import { PROVIDER_CATALOG } from "../core/ai-config.ts";
+import { ResponseSettings } from "./response-settings.tsx";
 import llmModels from "../../llm-models.json";
 type Runner = (command: Command) => Promise<Snapshot | null>;
 type SafeProvider = PublicAIConfig["providers"][number];
@@ -31,14 +33,18 @@ const TASKS: [Role, string, string][] = [
 ];
 export function AISettings({
   config,
+  response,
   busy,
   run,
 }: {
+  response?: ResponseConfig;
   config: PublicAIConfig;
   busy: boolean;
   run: Runner;
 }) {
-  const [section, setSection] = useState<"providers" | "tasks">("providers");
+  const [section, setSection] = useState<"providers" | "tasks" | "response">(
+    "providers",
+  );
   const [editing, setEditing] = useState<string | null>(null);
   return (
     <div className="ai-settings">
@@ -64,6 +70,12 @@ export function AISettings({
         >
           Model theo tác vụ
         </button>
+        <button
+          className={section === "response" ? "active" : ""}
+          onClick={() => setSection("response")}
+        >
+          Phong cách & nhịp trả lời
+        </button>
       </div>
       {section === "providers" ? (
         <>
@@ -80,7 +92,7 @@ export function AISettings({
               + Thêm provider
             </button>
           </div>
-          {editing !== null && (
+          {editing === "new" && (
             <ProviderEditor
               key={editing}
               provider={config.providers.find((p) => p.id === editing)}
@@ -88,18 +100,27 @@ export function AISettings({
               busy={busy}
               run={run}
               close={() => setEditing(null)}
+              created={(id) => setEditing(id)}
             />
           )}
           <div className="provider-grid">
             {config.providers.map((p) => (
-              <article className="card provider-card" key={p.id}>
+              <article
+                className={`card provider-card${editing === p.id ? " editing" : ""}`}
+                key={p.id}
+                aria-label={`Provider ${p.name}`}
+              >
                 <div className="section-heading">
                   <div>
                     <h3>{p.name}</h3>
                     <small>{PROVIDER_CATALOG[p.type].label}</small>
                   </div>
                   <span className="chip">
-                    {p.enabled ? "Đang bật" : "Đã tắt"}
+                    {editing === p.id
+                      ? "Đang chỉnh sửa"
+                      : p.enabled
+                        ? "Đang bật"
+                        : "Đã tắt"}
                   </span>
                 </div>
                 <p className="provider-url">{p.baseUrl}</p>
@@ -115,27 +136,38 @@ export function AISettings({
                     ? ` · ${p.testStatus === "ok" ? "Kết nối OK" : "Kiểm tra thất bại"}`
                     : ""}
                 </small>
-                <div className="inline">
-                  <button disabled={busy} onClick={() => setEditing(p.id)}>
-                    Chỉnh sửa
-                  </button>
-                  <button
-                    disabled={busy || !p.models.length || !p.enabled}
-                    onClick={() =>
-                      void run({ type: "provider.test", providerId: p.id })
-                    }
-                  >
-                    Kiểm tra
-                  </button>
-                  <button
-                    disabled={busy}
-                    onClick={() =>
-                      void run({ type: "provider.remove", providerId: p.id })
-                    }
-                  >
-                    Xóa cấu hình
-                  </button>
-                </div>
+                {editing === p.id ? (
+                  <ProviderEditor
+                    key={p.id}
+                    provider={p}
+                    latest={config.providers}
+                    busy={busy}
+                    run={run}
+                    close={() => setEditing(null)}
+                  />
+                ) : (
+                  <div className="inline">
+                    <button disabled={busy} onClick={() => setEditing(p.id)}>
+                      Chỉnh sửa
+                    </button>
+                    <button
+                      disabled={busy || !p.models.length || !p.enabled}
+                      onClick={() =>
+                        void run({ type: "provider.test", providerId: p.id })
+                      }
+                    >
+                      Kiểm tra
+                    </button>
+                    <button
+                      disabled={busy}
+                      onClick={() =>
+                        void run({ type: "provider.remove", providerId: p.id })
+                      }
+                    >
+                      Xóa cấu hình
+                    </button>
+                  </div>
+                )}
               </article>
             ))}
           </div>
@@ -149,9 +181,17 @@ export function AISettings({
             </div>
           )}
         </>
-      ) : (
+      ) : section === "tasks" ? (
         <TaskMatrix
           key={JSON.stringify([config.default, config.tasks])}
+          config={config}
+          busy={busy}
+          run={run}
+        />
+      ) : (
+        <ResponseSettings
+          key={JSON.stringify(response)}
+          settings={response}
           config={config}
           busy={busy}
           run={run}
@@ -166,12 +206,14 @@ function ProviderEditor({
   busy,
   run,
   close,
+  created,
 }: {
   provider?: SafeProvider;
   latest: SafeProvider[];
   busy: boolean;
   run: Runner;
   close: () => void;
+  created?: (id: string) => void;
 }) {
   const [value, setValue] = useState<
     Omit<AIProvider, "availableModels" | "testedAt" | "testStatus">
@@ -217,6 +259,8 @@ function ProviderEditor({
       setValue((v) => ({ ...v, apiKey: "" }));
       setClearKey(false);
       setSaved(true);
+      if (!provider && result.data.ai.providers.some((p) => p.id === value.id))
+        created?.(value.id);
     }
     return result;
   }
@@ -241,12 +285,17 @@ function ProviderEditor({
   return (
     <section className="card provider-editor">
       <div className="section-heading">
-        <h3>{provider ? "Chỉnh sửa provider" : "Thêm provider"}</h3>
+        <h3>
+          {provider ? `Chỉnh sửa provider · ${provider.name}` : "Thêm provider"}
+        </h3>
         <button disabled={busy} onClick={close}>
-          Đóng
+          Hủy
         </button>
       </div>
       <form
+        aria-label={
+          provider ? `Chỉnh sửa provider ${provider.name}` : "Thêm provider"
+        }
         onSubmit={async (e) => {
           e.preventDefault();
           if (await save()) close();
@@ -284,6 +333,7 @@ function ProviderEditor({
             Tên hiển thị
             <input
               required
+              autoFocus
               value={value.name}
               onChange={(e) => setValue({ ...value, name: e.target.value })}
             />
@@ -442,7 +492,7 @@ function ProviderEditor({
         </div>
         <div className="inline form-actions">
           <button className="primary" disabled={busy}>
-            Lưu provider
+            {provider ? "Lưu thay đổi" : "Tạo provider"}
           </button>
           <button
             type="button"

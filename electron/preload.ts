@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { Bridge } from "../src/core/types.ts";
 const api: Bridge = {
+  importDocuments: (files) => ipcRenderer.invoke("knowledge:documents", files),
   snapshot: () => ipcRenderer.invoke("app:snapshot"),
   command: (command) => ipcRenderer.invoke("app:command", command),
   bounds: (bounds) => ipcRenderer.invoke("browser:bounds", bounds),

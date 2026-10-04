@@ -6,6 +6,7 @@ import { messengerScript, messengerTimestamp } from "../src/core/messenger.ts";
 import { reconcileInbox } from "../src/core/inbox.ts";
 import { emptyState } from "../src/core/types.ts";
 import { ingest, latestId } from "../src/core/conversation.ts";
+import { messengerReadIssue } from "../src/core/messenger-readiness.ts";
 const now = new Date(2026, 9, 4, 11, 0, 30).getTime();
 const stamp = new Date(2026, 9, 4, 10, 19).getTime();
 const message = (sender: string, time: string, text: string, id = "") =>
@@ -50,6 +51,114 @@ test("live semantic Vietnamese NFD labels read direction, content and minute tim
     assert.equal(r.sendPresent, true);
     const again = run("read");
     assert.equal(again.messages[1].id, r.messages[1].id);
+  } finally {
+    d.window.close();
+  }
+});
+function renderedConversation(d: JSDOM) {
+  const doc = d.window.document;
+  doc.querySelector("a[aria-current]")!.removeAttribute("aria-current");
+  const region = doc.createElement("section");
+  region.setAttribute(
+    "aria-label",
+    "Cuộc trò chuyện với Tôi là DEV".normalize("NFD"),
+  );
+  for (const element of [
+    ...doc.querySelectorAll('[role="article"],[contenteditable],button'),
+  ])
+    region.append(element);
+  doc.body.append(region);
+  return region;
+}
+test("Messenger without aria-current binds the labelled conversation, composer and unique inbox URL for new incoming", () => {
+  const { d, run } = fixture();
+  try {
+    const region = renderedConversation(d);
+    region.insertAdjacentHTML(
+      "afterbegin",
+      message("Tôi là DEV", "10:20", "Tin mới", "new-message"),
+    );
+    const read = run("read");
+    assert.equal(read.selectedThreadId, "123");
+    assert.equal(
+      messengerReadIssue(read, { platformId: "123", name: "Tôi là DEV" }),
+      null,
+    );
+    assert.ok(
+      read.messages.some((m: { id: string }) => m.id === "new-message"),
+    );
+    assert.equal(
+      run("preflight", {
+        threadId: "123",
+        recipient: "Tôi là DEV",
+        latest: read.messages.at(-1).id,
+      }),
+      true,
+    );
+    region.setAttribute("aria-label", "Conversation with Tôi là DEV");
+    assert.equal(run("read").selectedThreadId, "123");
+  } finally {
+    d.window.close();
+  }
+});
+test("missing selection marker cannot use stale recipient DOM, duplicate names, foreign links or URL alone", () => {
+  const { d, run } = fixture();
+  try {
+    const region = renderedConversation(d);
+    const doc = d.window.document;
+    const link = doc.querySelector('a[href="/messages/t/123/"]')!;
+    const latest = run("read").messages.at(-1).id;
+    const blocked = () => {
+      assert.equal(run("read").selectedThreadId, null);
+      assert.throws(
+        () => run("preflight", { threadId: "123", latest }),
+        /Sai hội thoại/,
+      );
+    };
+    region.setAttribute("aria-label", "Cuộc trò chuyện với Người khác");
+    blocked();
+    region.setAttribute("aria-label", "Cuộc trò chuyện với Tôi là DEV");
+    link.setAttribute("href", "/messages/t/999/");
+    blocked();
+    link.setAttribute("href", "/messages/t/123/");
+    const duplicate = link.cloneNode(true) as Element;
+    duplicate.setAttribute("href", "/messages/t/999/");
+    link.parentElement!.append(duplicate);
+    blocked();
+    duplicate.remove();
+    link.setAttribute("href", "https://example.com/messages/t/123/");
+    blocked();
+    link.setAttribute("href", "/messages/t/123/");
+    region.removeAttribute("aria-label");
+    blocked();
+  } finally {
+    d.window.close();
+  }
+});
+test("selection on inbox row and aria-current=true work, but conflicting explicit selection never falls back", () => {
+  const { d, run } = fixture();
+  try {
+    renderedConversation(d);
+    const doc = d.window.document;
+    const link = doc.querySelector('a[href="/messages/t/123/"]')!;
+    link.parentElement!.setAttribute("aria-selected", "true");
+    assert.equal(run("read").selectedThreadId, "123");
+    link.parentElement!.removeAttribute("aria-selected");
+    link.setAttribute("aria-current", "true");
+    assert.equal(run("read").selectedThreadId, "123");
+    const other = doc.createElement("a");
+    other.href = "/messages/t/999/";
+    other.setAttribute("aria-current", "page");
+    other.innerHTML = '<span dir="auto">Người khác</span>';
+    link.parentElement!.append(other);
+    assert.equal(run("read").selectedThreadId, null);
+    link.removeAttribute("aria-current");
+    assert.equal(run("read").selectedThreadId, "999");
+    const latest = run("read").messages.at(-1).id;
+    assert.throws(
+      () => run("preflight", { threadId: "123", latest }),
+      /Sai hội thoại/,
+    );
   } finally {
     d.window.close();
   }
@@ -357,6 +466,67 @@ test("hidden dialogs and login controls do not block a ready Messenger page", ()
         run("preflight", { threadId: "123", latest: result.messages[0].id }),
       /xác minh/,
     );
+  } finally {
+    d.window.close();
+  }
+});
+
+test("semantic image messages preserve attachments and exclude avatars without misreading Anh as an image", () => {
+  const markup =
+    message("Tôi là DEV", "10:19", "Ảnh", "photo").replace(
+      "</div></div>",
+      '<img alt="Ảnh được gửi" width="240" src="https://scontent.fbcdn.net/photo.jpg?token=a"><img alt="Ảnh đại diện" width="80" src="https://scontent.fbcdn.net/avatar.jpg"></div></div>',
+    ) + message("Tôi là DEV", "10:20", "Anh ơi");
+  const { d, run } = fixture(markup);
+  try {
+    const read = run("read");
+    assert.equal(read.messages[0].attachments.length, 1);
+    assert.equal(read.messages[0].attachments[0].kind, "image");
+    assert.equal(read.messages[1].attachments, undefined);
+    const attachment = read.messages[0].attachments[0];
+    d.window.document.querySelector<HTMLImageElement>("img")!.src =
+      "https://scontent.fbcdn.net/photo.jpg?token=b";
+    assert.equal(run("read").messages[0].attachments[0].id, attachment.id);
+    assert.equal(
+      run("media-source", {
+        threadId: "123",
+        recipient: "Tôi là DEV",
+        messageId: "photo",
+        attachmentId: attachment.id,
+      }).source,
+      "https://scontent.fbcdn.net/photo.jpg?token=b",
+    );
+    assert.throws(
+      () =>
+        run("media-source", {
+          threadId: "999",
+          recipient: "Tôi là DEV",
+          messageId: "photo",
+          attachmentId: attachment.id,
+        }),
+      /hội thoại/,
+    );
+  } finally {
+    d.window.close();
+  }
+});
+test("voice message identity stays stable when a lazy audio source appears, including empty semantic text", () => {
+  const markup = message("Tôi là DEV", "10:19", "Tin nhắn thoại", "voice");
+  const { d, run } = fixture(markup);
+  try {
+    const first = run("read").messages[0];
+    assert.equal(first.attachments[0].kind, "audio");
+    const article = d.window.document.querySelector('[role="article"]')!;
+    article.insertAdjacentHTML(
+      "beforeend",
+      '<audio src="blob:https://www.facebook.com/voice"></audio>',
+    );
+    const loaded = run("read").messages[0];
+    assert.equal(loaded.attachments.length, 1);
+    assert.equal(loaded.attachments[0].id, first.attachments[0].id);
+    const node = article.querySelector("[aria-label]")!;
+    node.setAttribute("aria-label", "Tin nhắn do Tôi là DEV gửi lúc 10:19");
+    assert.equal(run("read").messages[0].text, "[Tin nhắn thoại]");
   } finally {
     d.window.close();
   }

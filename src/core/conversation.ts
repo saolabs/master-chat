@@ -1,4 +1,5 @@
 import type { Conversation, Message, Summary } from "./types.ts";
+import { messageContent } from "./response-style.ts";
 export const RECENT_WINDOW = 9;
 export function ingest(
   conversation: Conversation,
@@ -6,6 +7,36 @@ export function ingest(
   enabledAt: number | null,
 ): string[] {
   const ids = new Set(conversation.messages.map((m) => m.id));
+  for (const raw of observed) {
+    const saved = conversation.messages.find((m) => m.id === raw.id);
+    if (saved) saved.text = raw.text;
+    if (saved && raw.attachments?.length) {
+      if (
+        raw.attachments.some(
+          (a) => !saved.attachments?.some((old) => old.id === a.id),
+        ) &&
+        conversation.summary.coveredIds.includes(raw.id)
+      ) {
+        conversation.summary = {
+          text: "",
+          coveredIds: [],
+          revision: conversation.summary.revision + 1,
+        };
+      }
+      saved.attachments = raw.attachments.map((a) => {
+        const old = saved.attachments?.find((x) => x.id === a.id);
+        return old
+          ? {
+              ...old,
+              ...a,
+              analysis: old.analysis,
+              error: old.error,
+              analyzedAt: old.analyzedAt,
+            }
+          : a;
+      });
+    }
+  }
   const initial = !conversation.initialized;
   const fresh = observed
     .filter((m) => !ids.has(m.id) && (ids.add(m.id), true))
@@ -75,7 +106,9 @@ export function history(conversation: Conversation) {
       role:
         m.direction === "outgoing" ? ("assistant" as const) : ("user" as const),
       content:
-        m.direction === "system" ? `[Sự kiện nền tảng] ${m.text}` : m.text,
+        m.direction === "system"
+          ? `[Sự kiện nền tảng] ${m.text}`
+          : messageContent(m),
     }));
 }
 export function latestId(c: Conversation) {

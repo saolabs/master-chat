@@ -24,6 +24,71 @@ export type Message = {
   baseline: boolean;
   identity?: "platform" | "fingerprint";
   precision?: "exact" | "minute";
+  attachments?: Attachment[];
+};
+export type Attachment = {
+  id: string;
+  kind: "image" | "audio";
+  source?: string;
+  label?: string;
+  analysis?: string;
+  error?: string;
+  analyzedAt?: number;
+};
+export type LearnedStyle = {
+  instructions: string;
+  sampleIds: string[];
+  sampleCount: number;
+  updatedAt: number;
+};
+export type ProfileObservation = { detail: string; evidenceIds: string[] };
+export type ContactProfile = {
+  version: 1;
+  relationship: ProfileObservation | null;
+  address: ProfileObservation | null;
+  style: ProfileObservation | null;
+  facts: ProfileObservation[];
+  cautions: string[];
+  sourceIds: string[];
+  sourceHashes: Record<string, string>;
+  messageCount: number;
+  ownerMessageCount: number;
+  updatedAt: number;
+};
+export type ReplyReview = {
+  status: "approved" | "revised" | "held" | "unavailable" | "skipped";
+  issues: string[];
+  model?: ModelSelection;
+  originalText?: string;
+  reviewedText?: string;
+  checkedAt: number;
+};
+export type ResponseSettings = {
+  aboutMe?: string;
+  personality?: string;
+  instructions?: string;
+  learnStyle?: boolean;
+  providerCache?: boolean;
+  review?: { enabled?: boolean; model?: ModelSelection | null };
+  media?: {
+    enabled?: boolean;
+    imageModel?: ModelSelection | null;
+    audioModel?: ModelSelection | null;
+    transcription?: TranscriptionSettings;
+  };
+  typing?: {
+    enabled?: boolean;
+    charactersPerMinute?: number;
+    thinkingMs?: number;
+    maxDelayMs?: number;
+  };
+};
+export type TranscriptionSettings = {
+  mode?: "local" | "provider";
+  executable?: string;
+  modelPath?: string;
+  ffmpegPath?: string;
+  language?: string;
 };
 export type Summary = { text: string; coveredIds: string[]; revision: number };
 export type Conversation = {
@@ -40,6 +105,14 @@ export type Conversation = {
   discoveredAt?: number;
   diagnostics?: string;
   lastInboxSignature?: string;
+  responseStyle?: string;
+  learnStyle?: boolean;
+  learnedStyle?: LearnedStyle;
+  contactProfile?: ContactProfile;
+  relationshipContext?: string;
+  conversationDirection?: string;
+  profileAttemptKey?: string;
+  profileError?: string;
 };
 export type Draft = {
   id: string;
@@ -48,6 +121,10 @@ export type Draft = {
   basedOnId: string | null;
   triggerIds: string[];
   proactive: boolean;
+  automatic?: boolean;
+  origin?: "manual" | "ai";
+  review?: ReplyReview;
+  sendAfter?: number;
   status: "draft" | "sending" | "sent" | "uncertain" | "stale";
   createdAt: number;
 };
@@ -92,6 +169,7 @@ export type Knowledge = {
   title: string;
   text: string;
   accountId: string | null;
+  fileName?: string;
 };
 export type DOMProfile = {
   version: 1;
@@ -120,6 +198,7 @@ export type State = {
   ai: AIConfig;
   profiles: Partial<Record<Platform, DOMProfile>>;
   enabledAt: number | null;
+  response?: ResponseSettings;
 };
 export function emptyState(): State {
   return {
@@ -147,6 +226,15 @@ export type PublicState = Omit<State, "accounts" | "ai"> & {
 export function publicState(state: State): PublicState {
   return {
     ...state,
+    conversations: state.conversations.map((c) => ({
+      ...c,
+      messages: c.messages.map((m) => ({
+        ...m,
+        ...(m.attachments
+          ? { attachments: m.attachments.map(({ source, ...a }) => a) }
+          : {}),
+      })),
+    })),
     accounts: state.accounts.map(
       ({ password, cookies, recoveryPin, ...account }) => ({
         ...account,
@@ -175,6 +263,12 @@ export type Snapshot = {
   data: PublicState;
   tabs: BrowserTab[];
   paused: boolean;
+  pauseReason?: string;
+  live?: {
+    conversationId: string | null;
+    updatedAt: number | null;
+    error?: string;
+  };
   notice: string;
   monitors?: MonitorStatus[];
 };
@@ -231,6 +325,15 @@ export type Command =
   | { type: "inbox.sync"; accountId: string }
   | { type: "account.discovery"; accountId: string; enabled: boolean }
   | { type: "conversation.sync"; conversationId: string }
+  | { type: "conversation.watch"; conversationId: string | null }
+  | { type: "conversation.composing"; conversationId: string; active: boolean }
+  | { type: "account.auto"; accountId: string; enabled: boolean }
+  | {
+      type: "conversation.send";
+      conversationId: string;
+      text: string;
+      basedOnId: string | null;
+    }
   | {
       type: "provider.save";
       provider: Omit<AIProvider, "availableModels" | "testedAt" | "testStatus">;
@@ -242,6 +345,19 @@ export type Command =
       modelId?: string;
     }
   | { type: "ai.save"; config: Pick<AIConfig, "default" | "tasks"> }
+  | { type: "response.save"; settings: ResponseSettings }
+  | {
+      type: "conversation.style";
+      conversationId: string;
+      style?: string;
+      learnStyle?: boolean;
+      relationshipContext?: string;
+      conversationDirection?: string;
+    }
+  | {
+      type: "style.learn" | "media.retry" | "conversation.backfill";
+      conversationId: string;
+    }
   | { type: "profile.save"; profile: DOMProfile }
   | { type: "profile.reset" }
   | { type: "conversation.add"; accountId: string; name: string; url: string }
@@ -252,10 +368,25 @@ export type Command =
       text: string;
       accountId: string | null;
     }
+  | {
+      type: "knowledge.update";
+      knowledgeId: string;
+      title: string;
+      text: string;
+      accountId: string | null;
+    }
+  | { type: "knowledge.remove"; knowledgeId: string }
+  | {
+      type: "knowledge.import";
+      sources: { title: string; text: string; fileName: string }[];
+      accountId: string | null;
+    }
   | { type: "draft.generate"; conversationId: string; goal?: string }
   | { type: "draft.resolve"; draftId: string; outcome: "sent" | "stale" }
+  | { type: "draft.discard"; draftId: string }
   | { type: "draft.send"; draftId: string; text: string };
 export type Bridge = {
+  importDocuments(files?: DocumentUpload[]): Promise<DocumentImport[]>;
   snapshot(): Promise<Snapshot>;
   command(command: Command): Promise<Snapshot>;
   bounds(
@@ -263,3 +394,7 @@ export type Bridge = {
   ): Promise<void>;
   onChange(callback: () => void): () => void;
 };
+export type DocumentUpload = { name: string; data: Uint8Array };
+export type DocumentImport =
+  | { fileName: string; title: string; text: string; error?: never }
+  | { fileName: string; error: string; title?: never; text?: never };

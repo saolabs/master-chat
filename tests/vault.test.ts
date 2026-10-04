@@ -242,3 +242,73 @@ test("recovery PIN stays encrypted on disk and the attempt guard survives reopen
     false,
   );
 });
+
+test("cached transcript, contact profile and owner context survive encrypted vault reopening", async (t) => {
+  const dir = await directory(t),
+    v = new Vault(dir, secrets);
+  await v.open();
+  await v.mutate((s) => {
+    s.conversations.push({
+      id: "c",
+      accountId: "a",
+      platformId: "123",
+      name: "Friend",
+      url: "https://www.facebook.com/messages/t/123/",
+      messages: Array.from({ length: 50 }, (_, n) => ({
+        id: `m-${n}`,
+        text: n ? `Tin ${n}` : "",
+        direction: n % 2 ? "outgoing" : "incoming",
+        timestamp: n,
+        observedAt: n,
+        baseline: true,
+        ...(n === 0
+          ? {
+              attachments: [
+                {
+                  id: "voice",
+                  kind: "audio" as const,
+                  analysis: "cached-private-transcript-10am",
+                  analyzedAt: 100,
+                },
+              ],
+            }
+          : {}),
+      })),
+      initialized: true,
+      autoReply: false,
+      pendingIds: [],
+      summary: { text: "", coveredIds: [], revision: 0 },
+      relationshipContext: "private-relationship-detail",
+      conversationDirection: "Listen patiently",
+      contactProfile: {
+        version: 1,
+        relationship: { detail: "Friends", evidenceIds: ["m-1"] },
+        address: null,
+        style: null,
+        facts: [],
+        cautions: [],
+        messageCount: 50,
+        ownerMessageCount: 25,
+        sourceIds: Array.from({ length: 50 }, (_, n) => `m-${n}`),
+        sourceHashes: {},
+        updatedAt: 100,
+      },
+    });
+  });
+  const bytes = await readFile(path.join(dir, "data.vault"));
+  assert.equal(bytes.includes(Buffer.from("cached-private-transcript")), false);
+  assert.equal(
+    bytes.includes(Buffer.from("private-relationship-detail")),
+    false,
+  );
+  const reopened = new Vault(dir, secrets);
+  await reopened.open();
+  const c = reopened.read().conversations[0];
+  assert.equal(
+    c.messages[0].attachments?.[0].analysis,
+    "cached-private-transcript-10am",
+  );
+  assert.equal(c.contactProfile?.messageCount, 50);
+  assert.equal(c.relationshipContext, "private-relationship-detail");
+  assert.equal(c.conversationDirection, "Listen patiently");
+});

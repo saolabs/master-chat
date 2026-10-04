@@ -15,18 +15,25 @@
     "test": "node --import tsx --test tests/*.test.ts tests/*.test.tsx",
     "test:browser": "esbuild tests/electron-messenger-smoke.ts --bundle --platform=node --external:electron --format=cjs --outfile=out/tests/electron-messenger-smoke.cjs && electron out/tests/electron-messenger-smoke.cjs",
     "dist:mac": "npm run build && electron-builder --mac",
-    "dist:win": "npm run build && electron-builder --win"
+    "dist:win": "npm run build && electron-builder --win",
+    "setup:speech": "bash scripts/setup-speech.sh"
   },
   "dependencies": {
+    "html-to-text": "^10.0.1",
+    "lucide-react": "^1.52.0",
+    "pdfjs-dist": "^6.4.299",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
+    "word-extractor": "^1.0.4",
     "zod": "^4.1.5"
   },
   "devDependencies": {
+    "@types/html-to-text": "^9.0.4",
     "@types/jsdom": "^30.0.0",
     "@types/node": "^22.17.1",
     "@types/react": "^19.1.10",
     "@types/react-dom": "^19.1.7",
+    "@types/word-extractor": "^1.0.6",
     "@vitejs/plugin-react": "^5.0.0",
     "electron": "^43.3.0",
     "electron-builder": "^26.0.12",
@@ -52,6 +59,12 @@
       "target": [
         "dmg",
         "zip"
+      ],
+      "extraResources": [
+        {
+          "from": "runtime/speech/darwin-${arch}",
+          "to": "speech"
+        }
       ]
     },
     "win": {

@@ -29,6 +29,12 @@ import {
 } from "../src/core/messenger.ts";
 import type { Vault } from "./vault.ts";
 import { waitForMessengerRead } from "../src/core/messenger-readiness.ts";
+import {
+  allowedMediaSource,
+  boundedMedia,
+  readMediaBlob,
+  type MediaPayload,
+} from "../src/core/media.ts";
 type Entry = {
   meta: BrowserTab;
   view: WebContentsView;
@@ -42,6 +48,7 @@ export class Browsers {
   private inboxOffsets = new Map<string, number>();
   private inboxSignatures = new Map<string, Map<string, string>>();
   private workers = new Map<string, WebContentsView>();
+  private liveViews = new Map<string, WebContentsView>();
   private accountQueues = new Map<string, Promise<unknown>>();
   private selected: string | null = null;
   private bounds: Electron.Rectangle | null = null;
@@ -57,7 +64,7 @@ export class Browsers {
     private host: BrowserWindow,
     private vault: Vault,
     private changed: () => void,
-    private pause: () => void,
+    private pause: (reason?: string) => void,
   ) {}
   list() {
     return Array.from(this.entries.values()).map((e) => ({ ...e.meta }));
@@ -152,9 +159,12 @@ export class Browsers {
       this.loginTimers.delete(wc.id);
       this.loginBusy.delete(wc.id);
     });
-    wc.on("render-process-gone", () => this.pause());
+    wc.on("render-process-gone", () =>
+      this.pause("Trang Messenger bị đóng hoặc lỗi."),
+    );
     wc.on("before-input-event", (_event, input) => {
-      if (input.type === "keyDown") this.pause();
+      if (input.type === "keyDown")
+        this.pause("Bạn đang nhập trong trình duyệt Messenger.");
     });
   }
   private loginStatus(wc: WebContents, status: string) {
@@ -283,7 +293,7 @@ export class Browsers {
         loginScript("probe"),
       )) as LoginProbe;
       if (probe === "verification") {
-        this.pause();
+        this.pause("Facebook đang yêu cầu xác minh đăng nhập.");
         this.loginStatus(wc, "Cần xác minh · hoàn tất trên trình duyệt");
         if (!this.challenges.has(wc.id)) {
           this.challenges.add(wc.id);
@@ -672,15 +682,107 @@ export class Browsers {
   ): Promise<Omit<Message, "baseline">[]> {
     return this.serialized(c.accountId, () => this.readUnlocked(c, profile));
   }
+  async readHistory(
+    c: Conversation,
+    profile?: DOMProfile,
+    signal?: AbortSignal,
+  ) {
+    if (profile)
+      throw new Error(
+        "Nạp sâu cần bộ đọc Messenger tích hợp. Với bộ đọc riêng, mở và cuộn lịch sử rồi bấm Nạp lịch sử.",
+      );
+    return this.serialized(c.accountId, () =>
+      this.readUnlocked(c, undefined, {
+        limit: Math.min(5000, c.messages.length + 500),
+        signal,
+      }),
+    );
+  }
+  async readLiveConversation(
+    c: Conversation,
+    profile?: DOMProfile,
+  ): Promise<Omit<Message, "baseline">[]> {
+    const a = this.account(c.accountId);
+    if (
+      [...this.entries.values()].some(
+        (entry) => entry.worker && entry.meta.accountId === a.id,
+      )
+    )
+      throw new Error(
+        "Hoàn tất xác minh trong cửa sổ Messenger rồi đóng cửa sổ đó để cập nhật.",
+      );
+    let view = this.liveViews.get(a.id);
+    if (!view || view.webContents.isDestroyed()) {
+      view = new WebContentsView({
+        webPreferences: {
+          session: await this.accountSession(a),
+          sandbox: true,
+          contextIsolation: true,
+          nodeIntegration: false,
+          backgroundThrottling: false,
+        },
+      });
+      view.setBounds({ x: 0, y: 0, width: 1100, height: 800 });
+      this.protect(view.webContents, a);
+      this.liveViews.set(a.id, view);
+    }
+    const wc = view.webContents;
+    await this.assertSession(wc, a);
+    let currentId: string | null = null;
+    try {
+      currentId = threadIdentity(wc.getURL());
+    } catch {}
+    if (currentId !== c.platformId) await wc.loadURL(c.url);
+    if (profile) {
+      const read = await wc.executeJavaScript(readScript(profile));
+      if (
+        threadIdentity(wc.getURL()) !== c.platformId ||
+        read.threadId !== c.platformId ||
+        read.invalid
+      )
+        throw new Error("Bộ đọc chưa sẵn sàng cho hội thoại đang xem.");
+      return read.messages.map(
+        (m: Omit<Message, "baseline" | "observedAt">) => ({
+          ...m,
+          observedAt: Date.now(),
+        }),
+      );
+    }
+    const read = await waitForMessengerRead(
+      async () => {
+        let result = (await this.native(wc, "read")) as MessengerRead;
+        if (threadIdentity(wc.getURL()) !== c.platformId)
+          throw new Error(
+            "Hội thoại đang xem đã thay đổi; chặn cập nhật nhầm.",
+          );
+        if (result.blocked && (await this.restorePin(wc, a)) === "restored")
+          result = (await this.native(wc, "read")) as MessengerRead;
+        if (result.blocked) {
+          this.pause("Messenger đang yêu cầu xác minh hoặc khôi phục lịch sử.");
+          this.showWorker(a.id, view);
+          throw new Error(
+            "Messenger cần xác minh/PIN; hoàn tất trong cửa sổ vừa mở.",
+          );
+        }
+        return result;
+      },
+      c,
+      "Cập nhật hội thoại đang xem",
+    );
+    // This view stays on the selected thread and receives Messenger's own live updates.
+    // No history traversal or navigation through the other registered conversations.
+    return read.messages.map((m) => ({ ...m, observedAt: Date.now() }));
+  }
   private async readUnlocked(
     c: Conversation,
     profile?: DOMProfile,
+    history?: { limit: number; signal?: AbortSignal },
   ): Promise<Omit<Message, "baseline">[]> {
     const a = this.account(c.accountId),
       wc = await this.worker(a);
     if (
       [...this.entries.values()].some(
-        (e) => e.worker && e.view.webContents === wc,
+        (e) => e.worker && e.meta.accountId === a.id,
       )
     )
       throw new Error(
@@ -694,7 +796,7 @@ export class Browsers {
       // A new worker starts at about:blank.
     }
     if (currentId !== c.platformId) await wc.loadURL(c.url);
-    if (!profile) return this.readNative(wc, c);
+    if (!profile) return this.readNative(wc, c, history);
     // React may commit after did-finish-load. Poll bounded identity readiness without assuming a delay is success.
     for (let attempt = 0; attempt < 6; attempt++) {
       const result = await wc.executeJavaScript(readScript(profile));
@@ -715,21 +817,107 @@ export class Browsers {
     }
     throw new Error("Profile chưa đọc được ID, hướng hoặc timestamp đầy đủ.");
   }
+  async readAttachment(
+    c: Conversation,
+    messageId: string,
+    attachmentId: string,
+    signal?: AbortSignal,
+  ): Promise<MediaPayload> {
+    return this.serialized(c.accountId, async () => {
+      signal?.throwIfAborted();
+      const a = this.account(c.accountId),
+        wc = await this.worker(a);
+      await this.assertSession(wc, a);
+      let currentThread: string | null = null;
+      try {
+        currentThread = threadIdentity(wc.getURL());
+      } catch {}
+      if (currentThread !== c.platformId) await wc.loadURL(c.url);
+      let read = await waitForMessengerRead(
+        async () => this.native(wc, "read"),
+        c,
+        "Đọc media",
+      );
+      for (
+        let n = 0;
+        !read.messages.some((m) => m.id === messageId) && n < 10;
+        n++
+      ) {
+        signal?.throwIfAborted();
+        await this.native(wc, "scroll-history");
+        await new Promise((r) => setTimeout(r, 250));
+        read = await waitForMessengerRead(
+          async () => this.native(wc, "read"),
+          c,
+          "Tìm tin chứa media",
+        );
+      }
+      const options = {
+        threadId: c.platformId,
+        recipient: c.name,
+        messageId,
+        attachmentId,
+      };
+      wc.setAudioMuted(true);
+      let media = await this.native(wc, "media-source", {
+        ...options,
+        load: true,
+      });
+      for (let n = 0; !media.source && n < 12; n++) {
+        signal?.throwIfAborted();
+        await new Promise((r) => setTimeout(r, 250));
+        media = await this.native(wc, "media-source", options);
+      }
+      if (!media.source || !allowedMediaSource(media.source))
+        throw new Error(
+          "Messenger chưa cung cấp nguồn ảnh/âm thanh được hỗ trợ. Mở tệp trong Messenger rồi thử lại.",
+        );
+      signal?.throwIfAborted();
+      try {
+        if (media.source.startsWith("blob:")) {
+          const payload = await wc.executeJavaScript(
+            `(() => {const __name=(v)=>v;return (${readMediaBlob.toString()})(${JSON.stringify(media.source)},${JSON.stringify(media.kind)});})()`,
+          );
+          signal?.throwIfAborted();
+          return payload;
+        }
+        const response = await wc.session.fetch(media.source, {
+          redirect: "error",
+          credentials: "include",
+          signal: signal
+            ? AbortSignal.any([signal, AbortSignal.timeout(20000)])
+            : AbortSignal.timeout(20000),
+        });
+        return await boundedMedia(response, media.kind, signal);
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        throw new Error(
+          "Không tải được ảnh/âm thanh Messenger; tệp có thể đã hết hạn hoặc vượt 20 MB.",
+        );
+      }
+    });
+  }
   private async readNative(
     wc: WebContents,
     c: Conversation,
+    history?: { limit: number; signal?: AbortSignal },
   ): Promise<Omit<Message, "baseline">[]> {
     const capture = async () => {
-      let read = (await this.native(wc, "read")) as MessengerRead;
+      history?.signal?.throwIfAborted();
+      let read = (await this.native(wc, "read", {
+        historyLimit: history?.limit ?? 100,
+      })) as MessengerRead;
       if (threadIdentity(wc.getURL()) !== c.platformId)
         throw new Error("Facebook chuyển sang hội thoại khác; đã chặn đọc.");
       if (
         read.blocked &&
         (await this.restorePin(wc, this.account(c.accountId))) === "restored"
       )
-        read = (await this.native(wc, "read")) as MessengerRead;
+        read = (await this.native(wc, "read", {
+          historyLimit: history?.limit ?? 100,
+        })) as MessengerRead;
       if (read.blocked) {
-        this.pause();
+        this.pause("Messenger đang yêu cầu xác minh hoặc khôi phục lịch sử.");
         this.showWorker(c.accountId);
         throw new Error(
           `${read.blockedReason ?? "Messenger cần xác minh."} Hoàn tất trong cửa sổ Messenger vừa mở, đóng cửa sổ rồi nạp lại lịch sử.`,
@@ -747,8 +935,14 @@ export class Browsers {
     );
     const collected = new Map(result.messages.map((m) => [m.id, m]));
     // Bounded history backfill in the worker only; the person's visible browser never scrolls.
-    if (!c.messages.length && collected.size < 59)
-      for (let n = 0; n < 8 && collected.size < 59; n++) {
+    const limit = history?.limit ?? 100;
+    if ((history || !c.messages.length) && collected.size < limit)
+      for (
+        let n = 0, stalled = 0;
+        n < (history ? 60 : 12) && collected.size < limit;
+        n++
+      ) {
+        history?.signal?.throwIfAborted();
         if (!(await this.native(wc, "scroll-history"))) break;
         await new Promise((r) => setTimeout(r, 250));
         const older = await waitForMessengerRead(capture, c, "Tải lịch sử");
@@ -757,7 +951,8 @@ export class Browsers {
         for (const [id, m] of collected) combined.set(id, m);
         collected.clear();
         for (const [id, m] of combined) collected.set(id, m);
-        if (collected.size === before) break;
+        stalled = collected.size === before ? stalled + 1 : 0;
+        if (stalled >= 3) break;
       }
     await this.native(wc, "scroll-latest");
     await new Promise((r) => setTimeout(r, 250));
@@ -769,11 +964,11 @@ export class Browsers {
     for (const m of latest.messages) collected.set(m.id, m);
     // Retain DOM chronology when no absolute timestamp is available.
     return [...collected.values()]
-      .slice(-59)
+      .slice(-limit)
       .map((m) => ({ ...m, observedAt: Date.now() }));
   }
-  private showWorker(accountId: string) {
-    const view = this.workers.get(accountId);
+  private showWorker(accountId: string, providedView?: WebContentsView) {
+    const view = providedView ?? this.workers.get(accountId);
     if (!view || view.webContents.isDestroyed()) return;
     const existing = [...this.entries.values()].find((e) => e.view === view);
     if (existing) {
@@ -882,7 +1077,7 @@ export class Browsers {
       wc = await this.worker(a);
     if (
       [...this.entries.values()].some(
-        (e) => e.worker && e.view.webContents === wc,
+        (e) => e.worker && e.meta.accountId === a.id,
       )
     )
       throw new Error(
@@ -939,7 +1134,11 @@ export class Browsers {
   shutdown() {
     for (const timer of this.loginTimers.values()) clearInterval(timer);
     this.loginTimers.clear();
-    for (const w of [...this.workers.values(), ...this.monitors.values()])
+    for (const w of [
+      ...this.workers.values(),
+      ...this.monitors.values(),
+      ...this.liveViews.values(),
+    ])
       if (!w.webContents.isDestroyed()) w.webContents.close();
     for (const e of [...this.entries.values()]) this.close(e.meta.id);
   }

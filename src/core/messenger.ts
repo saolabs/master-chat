@@ -1,4 +1,4 @@
-import type { InboxThread, Message } from "./types.ts";
+import type { Attachment, InboxThread, Message } from "./types.ts";
 export function messengerTimestamp(
   value: string,
   now = Date.now(),
@@ -71,12 +71,16 @@ export type MessengerRead = {
   revision: number;
 };
 export type NativeOptions = {
+  historyLimit?: number;
   threadId?: string;
   recipient?: string;
   scrollTop?: number;
   latest?: string | null;
   text?: string;
   now?: number;
+  messageId?: string;
+  attachmentId?: string;
+  load?: boolean;
 };
 // Public rendered DOM only. No private React stores, endpoints, tokens or requests are inspected.
 export function messengerDOM(
@@ -91,7 +95,8 @@ export function messengerDOM(
     | "preflight"
     | "focus"
     | "click"
-    | "hover",
+    | "hover"
+    | "media-source",
   options: NativeOptions = {},
   parseStamp = messengerTimestamp,
 ): any {
@@ -269,19 +274,94 @@ export function messengerDOM(
     return true;
   }
   const messages: NativeMessage[] = [];
+  const messageNodes = new Map<string, HTMLElement>();
   const now = options.now ?? Date.now();
   for (const node of nodes) {
     const label = norm(node.getAttribute("aria-label") ?? "");
     const match =
       label.match(/Tin nhắn do (.+?) gửi lúc (.+?): ([\s\S]*)$/i) ??
-      label.match(/Message sent by (.+?) at (.+?): ([\s\S]*)$/i);
+      label.match(/Message sent by (.+?) at (.+?): ([\s\S]*)$/i) ??
+      label.match(/Tin nhắn do (.+?) gửi lúc (.+)$/i) ??
+      label.match(/Message sent by (.+?) at (.+)$/i);
     if (!match) continue;
     const direction = /^(ban|you)$/.test(plain(match[1]))
       ? ("outgoing" as const)
       : ("incoming" as const);
-    const text = match[3].trim();
-    if (!text) continue;
+    let text = (match[3] ?? "").trim();
     const article = node.closest('[role="article"]') ?? node;
+    const attachments: Attachment[] = [];
+    const seenSources = new Set<string>();
+    const addMedia = (
+      kind: Attachment["kind"],
+      source: string | undefined,
+      label = "",
+    ) => {
+      if (source && seenSources.has(source)) return;
+      if (source) seenSources.add(source);
+      let identity = label;
+      try {
+        const u = new URL(source!);
+        identity =
+          kind === "audio" || u.protocol === "blob:"
+            ? label
+            : u.origin + u.pathname;
+      } catch {}
+      attachments.push({
+        id: `media:${hash(JSON.stringify([kind, identity, attachments.length]))}`,
+        kind,
+        ...(source ? { source } : {}),
+        ...(label ? { label } : {}),
+      });
+    };
+    for (const img of Array.from(
+      node.querySelectorAll<HTMLImageElement>("img[src]"),
+    )) {
+      const alt = norm(img.alt || img.getAttribute("aria-label") || "");
+      if (/avatar|profile picture|anh dai dien/.test(plain(alt))) continue;
+      if (
+        img.naturalWidth > 40 ||
+        img.width > 40 ||
+        /anh|photo|image|sticker/.test(plain(alt))
+      )
+        addMedia("image", img.currentSrc || img.src, alt);
+    }
+    for (const audio of Array.from(
+      article.querySelectorAll<HTMLAudioElement>("audio"),
+    )) {
+      addMedia(
+        "audio",
+        audio.currentSrc ||
+          audio.src ||
+          audio.querySelector("source")?.src ||
+          undefined,
+        "Tin nhắn thoại",
+      );
+    }
+    const mediaLabel = plain(
+      Array.from(node.querySelectorAll("[aria-label]"))
+        .map((e) => e.getAttribute("aria-label"))
+        .join(" "),
+    );
+    if (
+      !attachments.some((a) => a.kind === "audio") &&
+      (/tin nhan (?:thoai|am thanh)|voice message|audio message/.test(
+        mediaLabel,
+      ) ||
+        /^(?:tin nhan (?:thoai|am thanh)|voice message|audio message)(?:\s*[\d:]+)?$/.test(
+          plain(text),
+        ))
+    )
+      addMedia("audio", undefined, "Tin nhắn thoại");
+    if (
+      !attachments.some((a) => a.kind === "image") &&
+      /^(?:Ảnh|Photo|Image)(?:\s+\d+)?$/iu.test(text)
+    )
+      addMedia("image", undefined, "Ảnh");
+    if (!text && attachments.length)
+      text = attachments.some((a) => a.kind === "audio")
+        ? "[Tin nhắn thoại]"
+        : "[Hình ảnh]";
+    if (!text) continue;
     const stamp =
       article.querySelector("time[datetime]")?.getAttribute("datetime") ??
       article
@@ -305,7 +385,9 @@ export function messengerDOM(
       timestamp: parsed.timestamp,
       precision: parsed.precision,
       identity: platformId ? "platform" : "fingerprint",
+      ...(attachments.length ? { attachments } : {}),
     });
+    messageNodes.set(id, node);
   }
   const counts = new Map<string, number>();
   for (const m of messages) counts.set(m.id, (counts.get(m.id) ?? 0) + 1);
@@ -332,21 +414,78 @@ export function messengerDOM(
         plain(e.getAttribute("aria-label") ?? ""),
       ),
     );
-  const selectedLink = grid?.querySelector<HTMLAnchorElement>(
-    'a[aria-current="page"]',
-  );
-  const selectedThreadId =
-    selectedLink?.pathname.match(/^\/messages\/(?:e2ee\/)?t\/(\d+)\/?$/)?.[1] ??
-    null;
   const recipient = norm(composer?.getAttribute("aria-label") ?? "").replace(
     /^(?:Viết cho|Message)\s+/i,
     "",
   );
+  const sameName = (a: string, b: string) =>
+    norm(a).trim().toLocaleLowerCase() === norm(b).trim().toLocaleLowerCase();
+  const links = Array.from(
+    grid?.querySelectorAll<HTMLAnchorElement>("a[href]") ?? [],
+  ).flatMap((link) => {
+    const url = new URL(link.getAttribute("href")!, location.href);
+    const id = url.pathname.match(/^\/messages\/(?:e2ee\/)?t\/(\d+)\/?$/)?.[1];
+    if (
+      !id ||
+      url.protocol !== "https:" ||
+      !["www.facebook.com", "facebook.com"].includes(url.hostname)
+    )
+      return [];
+    const name =
+      link.querySelector('span[dir="auto"]')?.textContent?.trim() ||
+      (
+        link.getAttribute("aria-label") ||
+        link.innerText ||
+        link.textContent ||
+        ""
+      )
+        .split("\n")[0]
+        .trim();
+    const marker = link.closest(
+      '[aria-current="page"],[aria-current="true"],[aria-selected="true"]',
+    );
+    return [{ id, name, marked: Boolean(marker && grid?.contains(marker)) }];
+  });
+  const markedIds = new Set(
+    links.filter((link) => link.marked).map((link) => link.id),
+  );
+  let selectedThreadId = markedIds.size === 1 ? [...markedIds][0] : null;
+  // Some Messenger layouts omit aria-current entirely. Bind the rendered
+  // conversation region and its composer to a unique inbox name + URL instead.
+  // A stale/conflicting explicit selection must never use this fallback.
+  if (!markedIds.size && threadId && composer && recipient) {
+    for (
+      let region = composer.parentElement;
+      region;
+      region = region.parentElement
+    ) {
+      const label = norm(region.getAttribute("aria-label") ?? "");
+      const match = label.match(
+        /^(?:Cuộc trò chuyện với|Conversation with)\s+(.+)$/i,
+      );
+      if (!match) continue;
+      const matchingIds = new Set(
+        links
+          .filter((link) => sameName(link.name, recipient))
+          .map((link) => link.id),
+      );
+      if (
+        visible(region) &&
+        sameName(match[1], recipient) &&
+        matchingIds.size === 1 &&
+        matchingIds.has(threadId)
+      )
+        selectedThreadId = threadId;
+      break;
+    }
+  }
   const result: MessengerRead = {
     threadId,
     selectedThreadId,
     name: recipient,
-    messages: messages.slice(-59),
+    messages: messages.slice(
+      -Math.min(5000, Math.max(1, options.historyLimit ?? 59)),
+    ),
     composerPresent: Boolean(composer),
     sendPresent: Boolean(send),
     invalid: messages.filter((m) => m.timestamp === null).length,
@@ -357,7 +496,7 @@ export function messengerDOM(
   };
   if (action === "read") return result;
   if (action === "hover") {
-    const node = nodes.find((_, i) => messages[i]?.id === options.latest);
+    const node = messageNodes.get(options.latest ?? "");
     if (!node) return null;
     node.scrollIntoView({ block: "nearest" });
     const rect = node.getBoundingClientRect();
@@ -376,6 +515,29 @@ export function messengerDOM(
     throw new Error(
       "Sai hội thoại, cần xác minh hoặc tin nhắn chưa định danh duy nhất.",
     );
+  if (action === "media-source") {
+    const message = messages.find((m) => m.id === options.messageId);
+    const attachment = message?.attachments?.find(
+      (a) => a.id === options.attachmentId,
+    );
+    if (!message || !attachment)
+      throw new Error("Tệp đính kèm không còn nằm trong đúng tin nhắn.");
+    if (!attachment.source && attachment.kind === "audio" && options.load) {
+      const node = messageNodes.get(message.id)!;
+      const play = Array.from(
+        (
+          node.closest('[role="article"]') ?? node
+        ).querySelectorAll<HTMLElement>('button,[role="button"]'),
+      ).find((e) =>
+        /^(phat|play)(?:\s|$)/.test(plain(e.getAttribute("aria-label") || "")),
+      );
+      play?.click();
+    }
+    if (attachment.source)
+      for (const audio of Array.from(document.querySelectorAll("audio")))
+        if (!audio.paused) audio.pause();
+    return attachment;
+  }
   if ((messages.at(-1)?.id ?? null) !== options.latest)
     throw new Error("Có tin mới; bản nháp đã hết hiệu lực.");
   if (!composer) throw new Error("Không tìm thấy ô soạn Messenger.");

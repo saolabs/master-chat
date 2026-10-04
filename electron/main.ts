@@ -5,12 +5,32 @@ import { z } from "zod";
 import { Vault } from "./vault.ts";
 import { Browsers } from "./browser.ts";
 import { Engine } from "./engine.ts";
+import {
+  validateTranscriptionSelection,
+  transcriptionMode,
+} from "./transcription.ts";
 import { discoverModels, providerChat } from "./ai.ts";
-import { providerURL, validateSelections } from "../src/core/ai-config.ts";
+import {
+  providerURL,
+  resolveModel,
+  validateSelections,
+} from "../src/core/ai-config.ts";
 import { threadIdentity } from "../src/core/urls.ts";
 import type { Command, DOMProfile, Snapshot } from "../src/core/types.ts";
 import { saveProvider, updateAccount } from "../src/core/settings.ts";
 import { publicState } from "../src/core/types.ts";
+import { isDifferentReviewModel } from "../src/core/reply-quality.ts";
+import {
+  knowledgeCommands,
+  applyKnowledgeCommand,
+  MAX_DOCUMENT_FILES,
+} from "../src/core/knowledge.ts";
+import {
+  DOCUMENT_EXTENSIONS,
+  MAX_DOCUMENT_BYTES,
+  readDocumentFiles,
+  readDocumentUploads,
+} from "./documents.ts";
 const platform = z.literal("messenger-personal");
 const id = z.string().uuid(),
   short = z.string().trim().min(1).max(200);
@@ -76,6 +96,93 @@ const providerSchema = z
   })
   .strict();
 const commands = z.discriminatedUnion("type", [
+  z
+    .object({
+      type: z.literal("response.save"),
+      settings: z
+        .object({
+          aboutMe: z.string().max(4000).optional(),
+          personality: z.string().max(4000).optional(),
+          instructions: z.string().max(8000).optional(),
+          learnStyle: z.boolean().optional(),
+          providerCache: z.boolean().optional(),
+          review: z
+            .object({
+              enabled: z.boolean().optional(),
+              model: selectionSchema.nullable().optional(),
+            })
+            .strict()
+            .optional(),
+          media: z
+            .object({
+              enabled: z.boolean().optional(),
+              imageModel: selectionSchema.nullable().optional(),
+              audioModel: selectionSchema.nullable().optional(),
+              transcription: z
+                .object({
+                  mode: z.enum(["local", "provider"]).optional(),
+                  executable: z.string().max(4000).optional(),
+                  modelPath: z.string().max(4000).optional(),
+                  ffmpegPath: z.string().max(4000).optional(),
+                  language: z
+                    .string()
+                    .regex(/^(?:auto|[a-z]{2,3})$/)
+                    .optional(),
+                })
+                .strict()
+                .optional(),
+            })
+            .strict()
+            .optional(),
+          typing: z
+            .object({
+              enabled: z.boolean().optional(),
+              charactersPerMinute: z.number().min(40).max(1200).optional(),
+              thinkingMs: z.number().int().min(0).max(60000).optional(),
+              maxDelayMs: z.number().int().min(1000).max(300000).optional(),
+            })
+            .strict()
+            .optional(),
+        })
+        .strict(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("conversation.style"),
+      conversationId: id,
+      style: z.string().max(4000).optional(),
+      learnStyle: z.boolean().optional(),
+      relationshipContext: z.string().max(12000).optional(),
+      conversationDirection: z.string().max(12000).optional(),
+    })
+    .strict(),
+  ...(["style.learn", "media.retry", "conversation.backfill"] as const).map(
+    (type) => z.object({ type: z.literal(type), conversationId: id }).strict(),
+  ),
+  z.object({ type: z.literal("draft.discard"), draftId: id }).strict(),
+  z
+    .object({
+      type: z.literal("account.auto"),
+      accountId: id,
+      enabled: z.boolean(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("conversation.composing"),
+      conversationId: id,
+      active: z.boolean(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("conversation.send"),
+      conversationId: id,
+      text: z.string().trim().min(1).max(5000),
+      basedOnId: z.string().min(1).max(2000).nullable(),
+    })
+    .strict(),
   z.object({ type: z.literal("inbox.sync"), accountId: id }).strict(),
   z
     .object({
@@ -86,6 +193,12 @@ const commands = z.discriminatedUnion("type", [
     .strict(),
   z
     .object({ type: z.literal("conversation.sync"), conversationId: id })
+    .strict(),
+  z
+    .object({
+      type: z.literal("conversation.watch"),
+      conversationId: id.nullable(),
+    })
     .strict(),
   z.object({ type: z.literal("profile.reset") }).strict(),
   z
@@ -161,14 +274,7 @@ const commands = z.discriminatedUnion("type", [
       enabled: z.boolean(),
     })
     .strict(),
-  z
-    .object({
-      type: z.literal("knowledge.add"),
-      title: short,
-      text: z.string().min(1).max(100000),
-      accountId: id.nullable(),
-    })
-    .strict(),
+  ...knowledgeCommands,
   z
     .object({
       type: z.literal("draft.generate"),
@@ -218,17 +324,92 @@ function snapshot(): Snapshot {
     data: publicState(state),
     tabs: browsers.list(),
     paused: engine.paused,
+    pauseReason: engine.pauseReason,
+    live: { ...engine.live },
     notice: engine.notice,
     monitors: structuredClone(engine.monitors),
   };
 }
 async function execute(cmd: Command) {
   switch (cmd.type) {
+    case "response.save":
+      engine.pause();
+      await vault.mutate((s) => {
+        const image = cmd.settings.media?.imageModel;
+        if (image)
+          resolveModel(
+            { ...s.ai, tasks: { ...s.ai.tasks, reply: image } },
+            "reply",
+          );
+        const audio = cmd.settings.media?.audioModel;
+        if (
+          audio &&
+          transcriptionMode(cmd.settings.media?.transcription, audio) ===
+            "provider"
+        )
+          validateTranscriptionSelection(s.ai, audio);
+        s.response = cmd.settings;
+        const reviewer = cmd.settings.review?.model;
+        if (reviewer && cmd.settings.review?.enabled !== false) {
+          resolveModel(
+            { ...s.ai, tasks: { ...s.ai.tasks, reply: reviewer } },
+            "reply",
+          );
+          if (
+            (s.ai.tasks.reply || s.ai.default) &&
+            !isDifferentReviewModel(
+              resolveModel(s.ai, "reply").selection,
+              reviewer,
+            )
+          )
+            throw new Error("Chọn model kiểm tra khác model viết câu trả lời.");
+        }
+      });
+      engine.report(
+        "Đã lưu phong cách, media và nhịp trả lời. Bấm Tiếp tục để chạy tự động.",
+      );
+      break;
+    case "conversation.style":
+      engine.pause();
+      await vault.mutate((s) => {
+        const c = s.conversations.find((c) => c.id === cmd.conversationId);
+        if (!c) throw new Error("Hội thoại không tồn tại.");
+        c.responseStyle = cmd.style?.trim() || undefined;
+        c.learnStyle = cmd.learnStyle;
+        c.relationshipContext = cmd.relationshipContext?.trim() || undefined;
+        c.conversationDirection =
+          cmd.conversationDirection?.trim() || undefined;
+        for (const d of s.drafts)
+          if (d.conversationId === c.id && d.status === "draft")
+            d.status = "stale";
+      });
+      break;
+    case "style.learn":
+      await engine.learnConversationStyle(cmd.conversationId);
+      break;
+    case "media.retry":
+      await engine.retryMedia(cmd.conversationId);
+      break;
+    case "account.auto":
+      await engine.setAccountAuto(cmd.accountId, cmd.enabled);
+      break;
+    case "conversation.composing":
+      engine.setComposing(cmd.conversationId, cmd.active);
+      break;
+    case "conversation.send":
+      await engine.sendMessage(cmd.conversationId, cmd.text, cmd.basedOnId);
+      break;
     case "inbox.sync":
       await engine.syncInbox(cmd.accountId);
       break;
+    case "conversation.watch":
+      engine.watchConversation(cmd.conversationId);
+      break;
     case "conversation.sync":
       await engine.syncConversation(cmd.conversationId);
+      break;
+    case "conversation.backfill":
+      await engine.backfillConversation(cmd.conversationId);
       break;
     case "account.discovery":
       engine.pause();
@@ -462,18 +643,26 @@ async function execute(cmd: Command) {
       });
       break;
     case "knowledge.add":
-      if (cmd.accountId) browsers.account(cmd.accountId);
-      await vault.mutate((s) => {
-        s.knowledge.push({
-          id: randomUUID(),
-          title: cmd.title,
-          text: cmd.text,
-          accountId: cmd.accountId,
-        });
-      });
+    case "knowledge.update":
+    case "knowledge.remove":
+    case "knowledge.import":
+      await vault.mutate((s) => applyKnowledgeCommand(s, cmd));
+      engine.report(
+        cmd.type === "knowledge.remove"
+          ? "Đã xóa nguồn tri thức."
+          : "Đã lưu tri thức.",
+      );
       break;
     case "draft.generate":
       await engine.generate(cmd.conversationId, cmd.goal);
+      break;
+    case "draft.discard":
+      await vault.mutate((s) => {
+        const d = s.drafts.find((d) => d.id === cmd.draftId);
+        if (!d || !["draft", "stale", "sent"].includes(d.status))
+          throw new Error("Không thể bỏ tin đang gửi hoặc chưa rõ kết quả.");
+        if (d.status === "draft") d.status = "stale";
+      });
       break;
     case "draft.resolve":
       engine.pause();
@@ -518,7 +707,9 @@ app.whenReady().then(async () => {
     });
     main.webContents.on("will-navigate", (e) => e.preventDefault());
     main.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-    browsers = new Browsers(main, vault, changed, () => engine?.pause());
+    browsers = new Browsers(main, vault, changed, (reason) =>
+      engine?.pause(reason),
+    );
     engine = new Engine(vault, browsers, changed);
     ipcMain.handle("app:snapshot", (e) => {
       trusted(e);
@@ -527,6 +718,35 @@ app.whenReady().then(async () => {
     ipcMain.handle("app:command", (e, input) => {
       trusted(e);
       return execute(commands.parse(input) as Command);
+    });
+    ipcMain.handle("knowledge:documents", async (e, input) => {
+      trusted(e);
+      if (input !== undefined) {
+        const files = z
+          .array(
+            z
+              .object({
+                name: z.string().min(1).max(255),
+                data: z
+                  .instanceof(Uint8Array)
+                  .refine(
+                    (data) => data.byteLength <= MAX_DOCUMENT_BYTES,
+                    "File vượt quá 20 MB.",
+                  ),
+              })
+              .strict(),
+          )
+          .max(MAX_DOCUMENT_FILES)
+          .parse(input);
+        return readDocumentUploads(files);
+      }
+      if (!main) throw new Error("Cửa sổ chưa sẵn sàng.");
+      const choice = await dialog.showOpenDialog(main, {
+        title: "Nhập tài liệu vào kho tri thức",
+        properties: ["openFile", "multiSelections"],
+        filters: [{ name: "Tài liệu", extensions: DOCUMENT_EXTENSIONS }],
+      });
+      return choice.canceled ? [] : readDocumentFiles(choice.filePaths);
     });
     ipcMain.handle("browser:bounds", (e, input) => {
       trusted(e);

@@ -52,8 +52,10 @@ export class Vault {
       )
         throw new Error("Phiên bản vault không được hỗ trợ.");
       this.state.ai = migrateAI(this.state.ai);
-      for (const d of this.state.drafts)
+      for (const d of this.state.drafts) {
         if (d.status === "sending") d.status = "uncertain";
+        delete d.sendAfter;
+      }
       const removedAccountIds = new Set(
         this.state.accounts
           .filter((a) => (a.platform as string) !== "messenger-personal")
