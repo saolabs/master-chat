@@ -100,7 +100,8 @@ export type Conversation = {
   url: string;
   messages: Message[];
   initialized: boolean;
-  autoReply: boolean;
+  // null inherits the account default; booleans are conversation overrides.
+  autoReply: boolean | null;
   pendingIds: string[];
   summary: Summary;
   discoveredAt?: number;
@@ -375,7 +376,11 @@ export type Command =
   | { type: "profile.save"; profile: DOMProfile }
   | { type: "profile.reset" }
   | { type: "conversation.add"; accountId: string; name: string; url: string }
-  | { type: "conversation.auto"; conversationId: string; enabled: boolean }
+  | {
+      type: "conversation.auto";
+      conversationId: string;
+      enabled: boolean | null;
+    }
   | {
       type: "knowledge.add";
       title: string;

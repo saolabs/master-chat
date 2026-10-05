@@ -8,6 +8,7 @@ import {
   Square,
 } from "lucide-react";
 import type { Command, Snapshot } from "../core/types.ts";
+import { isAutoReplyEnabled } from "../core/auto-reply.ts";
 
 export function InboxControls({
   snapshot,
@@ -19,11 +20,11 @@ export function InboxControls({
   run: (command: Command) => Promise<Snapshot | null>;
 }) {
   const { accounts, conversations } = snapshot.data;
-  const enabled = conversations.filter((c) => c.autoReply).length;
+  const enabled = conversations.filter((c) =>
+    isAutoReplyEnabled(c, accounts),
+  ).length;
   const allEnabled =
-    accounts.length > 0 &&
-    accounts.every((a) => a.autoDiscoverReply) &&
-    enabled === conversations.length;
+    accounts.length > 0 && accounts.every((a) => a.autoDiscoverReply);
   return (
     <div
       className="inbox-controls"
@@ -43,7 +44,7 @@ export function InboxControls({
           <span>
             {enabled}/{conversations.length} hội thoại ·{" "}
             {accounts.filter((a) => a.autoDiscoverReply).length}/
-            {accounts.length} tài khoản bật hội thoại mới
+            {accounts.length} tài khoản bật mặc định
           </span>
         </div>
         {snapshot.paused && snapshot.pauseReason && (
@@ -80,15 +81,13 @@ export function InboxControls({
           }
           onClick={() => void run({ type: "automation.all", enabled: true })}
         >
-          <Play size={15} /> Bật và chạy tất cả
+          <Play size={15} /> Bật hệ thống
         </button>
         <button
-          disabled={
-            busy || (!enabled && !accounts.some((a) => a.autoDiscoverReply))
-          }
+          disabled={busy || !accounts.some((a) => a.autoDiscoverReply)}
           onClick={() => void run({ type: "automation.all", enabled: false })}
         >
-          <Power size={15} /> Tắt tất cả
+          <Power size={15} /> Tắt hệ thống
         </button>
       </div>
     </div>
@@ -121,6 +120,7 @@ export function InboxRows({
   return (
     <>
       {ordered.map((c) => {
+        const autoReply = isAutoReplyEnabled(c, accounts);
         const draft = drafts.find(
           (d) =>
             d.conversationId === c.id &&
@@ -131,7 +131,7 @@ export function InboxRows({
           (!draft?.automatic &&
             (draft?.review?.status === "held" ||
               draft?.review?.status === "unavailable"));
-        const pending = c.autoReply && c.pendingIds.length > 0;
+        const pending = autoReply && c.pendingIds.length > 0;
         const status =
           draft?.status === "uncertain"
             ? "Chưa rõ kết quả gửi · Cần kiểm tra"
@@ -147,7 +147,7 @@ export function InboxRows({
                       ? "Đang soạn phản hồi"
                       : pending
                         ? "Chờ trả lời"
-                        : c.autoReply
+                        : autoReply
                           ? "Tự trả lời"
                           : "Chỉ theo dõi";
         return (
@@ -184,7 +184,7 @@ export function InboxRows({
               ) : pending || draft?.status === "sending" ? (
                 <RefreshCw size={13} />
               ) : (
-                <i className={c.autoReply ? "dot green" : "dot"} />
+                <i className={autoReply ? "dot green" : "dot"} />
               )}
             </span>
           </button>

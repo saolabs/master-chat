@@ -351,8 +351,7 @@ function App() {
                               })
                             }
                           />
-                          Cho phép tự trả lời các hội thoại được phát hiện từ
-                          lần quét tiếp theo
+                          Tự trả lời mặc định của tài khoản
                         </label>
                         <div className="inline account-auto-actions">
                           <button
@@ -365,7 +364,7 @@ function App() {
                               })
                             }
                           >
-                            Bật và chạy tài khoản
+                            Bật mặc định tài khoản
                           </button>
                           <button
                             disabled={busy}
@@ -377,7 +376,7 @@ function App() {
                               })
                             }
                           >
-                            Tắt toàn bộ
+                            Tắt mặc định tài khoản
                           </button>
                         </div>
                       </div>

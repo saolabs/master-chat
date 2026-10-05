@@ -362,13 +362,13 @@ Quyền được kiểm tra theo endpoint, không chỉ theo tên loại provide
 Sau khi đọc hội thoại, engine chỉ vào nhánh tự trả lời nếu:
 
 - Engine đang chạy.
-- `autoReply` của hội thoại bật.
+- Tự trả lời thực tế của hội thoại bật: `autoReply: null` kế thừa `autoDiscoverReply` của tài khoản; `true`/`false` ghi đè riêng.
 - Có pending và ID tin cuối nằm trong pending.
 - Tin cuối là incoming.
 - Nếu dùng DOM profile tùy chỉnh, profile đã được xác minh.
 - Hội thoại không có bản nháp `sending` hoặc `uncertain`, nháp thủ công đang chờ, hay nội dung đang soạn trong ô chat của ứng dụng.
 
-Checkbox “auto cho hội thoại mới” ở account chỉ áp dụng cho các thread phát hiện tiếp theo. Nút **Bật tự trả lời toàn bộ** trong Quản lý inbox bật cả hội thoại hiện có và quyền cho hội thoại mới của tài khoản đó; **Tắt toàn bộ** tắt cả hai. Thao tác này tạm dừng engine, cần bấm **Tiếp tục** để chạy nền.
+Switch trong hội thoại chỉ có **Theo hệ thống**, **Tắt**, **Bật**. Hội thoại mới kế thừa mặc định tài khoản; các giá trị boolean đã lưu từ bản cũ giữ nguyên. Thiết lập mặc định tài khoản áp dụng cho mọi hội thoại đang **Theo hệ thống**, kể cả hội thoại hiện có. **Bật hệ thống**/**Tắt hệ thống** cập nhật mặc định của mọi tài khoản và giữ lựa chọn riêng. Bật hệ thống chạy engine; tắt hệ thống vẫn đồng bộ và các hội thoại ghi đè **Bật** vẫn có thể tự trả lời nếu engine đang chạy. **Tạm dừng** luôn chặn tự trả lời ở mọi chế độ.
 
 Khi engine hoạt động, summary có thể được cập nhật ngay cả ở hội thoại không bật auto nếu có batch và model summary/default đã cấu hình. Tắt auto của thread chặn tự trả lời, không đồng nghĩa chặn mọi xử lý ngữ cảnh.
 

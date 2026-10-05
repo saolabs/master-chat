@@ -6,6 +6,7 @@ import { emptyState, type State, type DOMProfile } from "../src/core/types.ts";
 import type { Vault } from "../electron/vault.ts";
 import type { Browsers } from "../electron/browser.ts";
 import { SendNotAttemptedError } from "../src/core/send-status.ts";
+import { isAutoReplyEnabled } from "../src/core/auto-reply.ts";
 function aiConfig(model: string) {
   const ai = emptyState().ai;
   ai.providers.push({
@@ -423,7 +424,11 @@ test("paused inbox discovery imports threads and status without reading conversa
   };
   const found = await r.engine.syncInbox("a");
   assert.equal(found.added.length, 1);
-  assert.equal(r.state.conversations[1].autoReply, false);
+  assert.equal(r.state.conversations[1].autoReply, null);
+  assert.equal(
+    isAutoReplyEnabled(r.state.conversations[1], r.state.accounts),
+    false,
+  );
   assert.equal(r.state.conversations[1].initialized, false);
   assert.equal(r.state.drafts.length, 0);
   assert.equal(r.engine.monitors[0].coverage, "partial");
@@ -1011,7 +1016,11 @@ test("hidden old unread discovered after account baseline cannot use another acc
   await (r.engine as unknown as { tick(): Promise<void> }).tick();
   assert.equal(generated, 0);
   assert.deepEqual(r.state.conversations[1].pendingIds, []);
-  assert.equal(r.state.conversations[1].autoReply, true);
+  assert.equal(r.state.conversations[1].autoReply, null);
+  assert.equal(
+    isAutoReplyEnabled(r.state.conversations[1], r.state.accounts),
+    true,
+  );
   assert.equal(r.sent(), 0);
 });
 
@@ -1345,9 +1354,10 @@ test("manual AI draft is retained across background ticks", async (t) => {
   assert.equal(r.sent(), 0);
 });
 
-test("account-wide auto enables current and discovered conversations and starts monitoring", async (t) => {
+test("account-wide default enables inherited conversations and starts monitoring", async (t) => {
   const r = rig();
   t.after(() => r.engine.shutdown());
+  r.state.conversations[0].autoReply = null;
   r.state.accounts.push({ ...r.state.accounts[0], id: "other-account" });
   r.state.conversations.push({
     ...r.state.conversations[0],
@@ -1359,18 +1369,26 @@ test("account-wide auto enables current and discovered conversations and starts 
   await r.engine.setAccountAuto("a", true);
   assert.equal(r.engine.paused, false);
   assert.equal(r.state.accounts[0].autoDiscoverReply, true);
-  assert.equal(r.state.conversations[0].autoReply, true);
+  assert.equal(r.state.conversations[0].autoReply, null);
+  assert.equal(
+    isAutoReplyEnabled(r.state.conversations[0], r.state.accounts),
+    true,
+  );
   assert.equal(r.state.conversations[1].autoReply, false);
   assert.equal(r.sent(), 0);
   await r.engine.setAccountAuto("a", false);
   assert.equal(r.state.accounts[0].autoDiscoverReply, false);
-  assert.equal(r.state.conversations[0].autoReply, false);
+  assert.equal(
+    isAutoReplyEnabled(r.state.conversations[0], r.state.accounts),
+    false,
+  );
   assert.equal(r.engine.paused, false);
 });
 
 test("global activation includes every account without clearing uncertain drafts or cutoffs", async (t) => {
   const r = rig();
   t.after(() => r.engine.shutdown());
+  r.state.conversations[0].autoReply = null;
   r.state.accounts.push({ ...r.state.accounts[0], id: "b" });
   r.state.accounts[0].monitorStartedAt = 100;
   r.state.enabledAt = 50;
@@ -1392,14 +1410,73 @@ test("global activation includes every account without clearing uncertain drafts
   await r.engine.setAllAuto(true);
   assert.equal(r.engine.paused, false);
   assert.ok(r.state.accounts.every((a) => a.autoDiscoverReply));
-  assert.ok(r.state.conversations.every((c) => c.autoReply));
+  assert.ok(
+    r.state.conversations.every((c) => isAutoReplyEnabled(c, r.state.accounts)),
+  );
   assert.equal(r.state.accounts[0].monitorStartedAt, 100);
   assert.equal(r.state.enabledAt, 50);
   assert.equal(r.state.drafts[0].status, "uncertain");
   assert.equal(r.sent(), 0);
   await r.engine.setAllAuto(false);
   assert.ok(r.state.accounts.every((a) => !a.autoDiscoverReply));
-  assert.ok(r.state.conversations.every((c) => !c.autoReply));
+  assert.ok(
+    r.state.conversations.every(
+      (c) => !isAutoReplyEnabled(c, r.state.accounts),
+    ),
+  );
+});
+
+test("account and global defaults retain both conversation overrides", async (t) => {
+  const r = rig();
+  t.after(() => r.engine.shutdown());
+  r.state.conversations[0].autoReply = null;
+  r.state.conversations.push(
+    { ...r.state.conversations[0], id: "off", autoReply: false },
+    { ...r.state.conversations[0], id: "on", autoReply: true },
+  );
+  const modes = () => r.state.conversations.map((c) => c.autoReply);
+  const enabled = () =>
+    r.state.conversations.map((c) => isAutoReplyEnabled(c, r.state.accounts));
+  await r.engine.setAccountAuto("a", true);
+  assert.deepEqual(modes(), [null, false, true]);
+  assert.deepEqual(enabled(), [true, false, true]);
+  await r.engine.setAllAuto(false);
+  assert.deepEqual(modes(), [null, false, true]);
+  assert.deepEqual(enabled(), [false, false, true]);
+  await r.engine.setConversationAuto("off", null);
+  assert.equal(
+    isAutoReplyEnabled(r.state.conversations[1], r.state.accounts),
+    false,
+  );
+  await r.engine.setAllAuto(true);
+  assert.deepEqual(enabled(), [true, true, true]);
+});
+
+test("inherited automatic send follows the current default and keeps pause authoritative", async (t) => {
+  const r = scheduledRig();
+  t.after(() => r.engine.shutdown());
+  r.state.conversations[0].autoReply = null;
+  r.state.accounts[0].autoDiscoverReply = false;
+  await assert.rejects(r.engine.send("delayed", "Ok", true), /chưa cho phép/);
+  r.state.accounts[0].autoDiscoverReply = true;
+  r.engine.paused = true;
+  await assert.rejects(r.engine.send("delayed", "Ok", true), /resume/);
+  r.engine.paused = false;
+  await r.engine.send("delayed", "Ok", true);
+  assert.equal(r.sent(), 1);
+});
+
+test("returning to an off system default cancels a scheduled override reply", async (t) => {
+  const r = scheduledRig();
+  t.after(() => r.engine.shutdown());
+  await (r.engine as unknown as { tick(): Promise<void> }).tick();
+  assert.ok(r.state.drafts[0].sendAfter);
+  await r.engine.setConversationAuto("c", null);
+  assert.equal(r.state.conversations[0].autoReply, null);
+  assert.equal(r.state.drafts[0].status, "stale");
+  assert.equal(r.state.drafts[0].sendAfter, undefined);
+  await new Promise((resolve) => setTimeout(resolve, 160));
+  assert.equal(r.sent(), 0);
 });
 
 test("a new explicit pause during activation is not overridden", async (t) => {

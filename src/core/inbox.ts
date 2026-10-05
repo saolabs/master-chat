@@ -25,7 +25,7 @@ export function reconcileInbox(
         url: thread.url,
         messages: [],
         initialized: false,
-        autoReply: Boolean(account.autoDiscoverReply),
+        autoReply: null,
         pendingIds: [],
         summary: { text: "", coveredIds: [], revision: 0 },
         discoveredAt: scan.scannedAt,

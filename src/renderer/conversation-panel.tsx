@@ -232,29 +232,35 @@ export function ConversationPanel({
         </button>
       </div>
       <div className="chat-options">
-        <label className="toggle">
-          <input
-            type="checkbox"
-            checked={c.autoReply}
-            disabled={busy}
-            onChange={(e) =>
-              void run({
-                type: "conversation.auto",
-                conversationId: c.id,
-                enabled: e.target.checked,
-              })
-            }
-          />
-          Tự động trả lời
-        </label>
-        {c.autoReply &&
-          !snapshot.paused &&
-          !(snapshot.data.ai.tasks.reply || snapshot.data.ai.default) && (
-            <span className="reply-state">Chưa chọn model trả lời</span>
-          )}
-        {!c.autoReply && (
-          <span className="reply-state">Chỉ cập nhật, không tự trả lời</span>
-        )}
+        <div
+          className="auto-reply-switch"
+          role="group"
+          aria-label="Tự động trả lời"
+        >
+          {(
+            [
+              { label: "Theo hệ thống", value: null },
+              { label: "Tắt", value: false },
+              { label: "Bật", value: true },
+            ] as const
+          ).map(({ label, value }) => (
+            <button
+              key={label}
+              type="button"
+              aria-pressed={(c.autoReply ?? null) === value}
+              disabled={busy}
+              onClick={() =>
+                void run({
+                  type: "conversation.auto",
+                  conversationId: c.id,
+                  enabled: value,
+                })
+              }
+            >
+              {label}
+            </button>
+          ))}
+        </div>
         {c.diagnostics && (
           <details className="chat-diagnostics">
             <summary>Chi tiết bộ đọc</summary>

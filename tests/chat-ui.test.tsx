@@ -71,6 +71,8 @@ async function mount(t: TestContext, review?: ReplyReview) {
   });
   const run = async (command: Command) => {
     calls.push(command);
+    if (command.type === "conversation.auto")
+      state.conversations[0].autoReply = command.enabled;
     if (command.type === "draft.generate")
       state.drafts.push({
         id: "ai",
@@ -166,6 +168,31 @@ async function mount(t: TestContext, review?: ReplyReview) {
     composition: () => composition,
   };
 }
+
+test("auto-reply switch selects exactly one persisted mode without explanatory text", async (t) => {
+  const r = await mount(t);
+  const group = () =>
+    r.dom.window.document.querySelector('[aria-label="Tự động trả lời"]')!;
+  const selected = () =>
+    group().querySelector('[aria-pressed="true"]')?.textContent;
+  assert.equal(selected(), "Bật");
+  assert.equal(group().querySelectorAll("button").length, 3);
+  for (const [label, enabled] of [
+    ["Theo hệ thống", null],
+    ["Tắt", false],
+    ["Bật", true],
+  ] as const) {
+    await r.click(label);
+    assert.deepEqual(r.calls.at(-1), {
+      type: "conversation.auto",
+      conversationId: "c",
+      enabled,
+    });
+    assert.equal(selected(), label);
+    assert.equal(group().querySelectorAll('[aria-pressed="true"]').length, 1);
+  }
+  assert.equal(r.dom.window.document.querySelector(".reply-state"), null);
+});
 
 test("manual composer sends while automation is paused and preserves content on failure", async (t) => {
   const r = await mount(t);

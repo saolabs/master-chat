@@ -95,6 +95,29 @@ test("global controls distinguish paused, running and sync-only states", () => {
   snapshot.data.conversations.forEach((c) => (c.autoReply = false));
   assert.match(render(), /Chỉ đồng bộ/);
 });
+test("inbox indicators and counts use the account default only for inherited conversations", () => {
+  const snapshot = fixture();
+  snapshot.data.conversations[0].autoReply = null;
+  snapshot.data.conversations[1].autoReply = false;
+  snapshot.data.drafts = [];
+  const controls = () =>
+    renderToStaticMarkup(
+      <InboxControls
+        snapshot={snapshot}
+        busy={false}
+        run={async () => snapshot}
+      />,
+    );
+  const rows = () =>
+    renderToStaticMarkup(<InboxRows snapshot={snapshot} select={() => {}} />);
+  assert.match(controls(), /1\/2 hội thoại/);
+  assert.match(rows(), /Tự trả lời/);
+  snapshot.data.accounts[0].autoDiscoverReply = false;
+  assert.match(controls(), /0\/2 hội thoại/);
+  assert.doesNotMatch(rows(), /Tự trả lời/);
+  snapshot.data.conversations[1].autoReply = true;
+  assert.match(controls(), /1\/2 hội thoại/);
+});
 test("review warnings are advisory for automatic drafts, uncertain remains actionable", () => {
   const snapshot = fixture();
   snapshot.data.drafts[0].automatic = true;

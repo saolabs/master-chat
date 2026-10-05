@@ -294,7 +294,7 @@ const commands = z.discriminatedUnion("type", [
     .object({
       type: z.literal("conversation.auto"),
       conversationId: id,
-      enabled: z.boolean(),
+      enabled: z.boolean().nullable(),
     })
     .strict(),
   ...knowledgeCommands,
@@ -686,7 +686,7 @@ async function execute(cmd: Command) {
           url: cmd.url,
           messages: [],
           initialized: false,
-          autoReply: false,
+          autoReply: null,
           pendingIds: [],
           summary: { text: "", coveredIds: [], revision: 0 },
         });

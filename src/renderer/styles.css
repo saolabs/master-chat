@@ -1499,10 +1499,44 @@ code {
   border-bottom: 1px solid #edf0f5;
   flex-shrink: 0;
 }
-.chat-options .toggle {
-  margin: 0;
-  padding: 0;
+.auto-reply-switch {
+  display: flex;
+  gap: 3px;
+  width: 100%;
+  max-width: 336px;
+  padding: 3px;
+  border: 1px solid #dce3ef;
+  border-radius: 9px;
+  background: #f3f5fa;
+}
+.auto-reply-switch button {
+  flex: 1;
+  min-width: 0;
+  min-height: 36px;
+  padding: 6px 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #6a7891;
+  font-weight: 400;
   white-space: nowrap;
+}
+.auto-reply-switch button:first-child {
+  flex: 2;
+}
+.auto-reply-switch button:hover:not(:disabled) {
+  background: #e8edf6;
+}
+.auto-reply-switch button[aria-pressed="true"] {
+  background: white;
+  color: #087cff;
+  font-weight: 500;
+  box-shadow: 0 1px 4px #26395222;
+}
+@media (pointer: coarse) {
+  .auto-reply-switch button {
+    min-height: 44px;
+  }
 }
 .chat-diagnostics {
   color: #7e8ba1;

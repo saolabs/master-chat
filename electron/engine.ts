@@ -33,6 +33,7 @@ import {
   reviewSelection,
 } from "../src/core/reply-quality.ts";
 import { resolveModel } from "../src/core/ai-config.ts";
+import { isAutoReplyEnabled } from "../src/core/auto-reply.ts";
 import type {
   AIConfig,
   AIProvider,
@@ -230,6 +231,11 @@ export class Engine {
     const c = this.vault.read().conversations.find((c) => c.id === id);
     if (!c) throw new Error("Hội thoại không tồn tại.");
     return c;
+  }
+  private autoReplyEnabled(id: string) {
+    const state = this.vault.read();
+    const c = state.conversations.find((c) => c.id === id);
+    return Boolean(c && isAutoReplyEnabled(c, state.accounts));
   }
   private async observe(c: Conversation, live = false) {
     const s = this.vault.read(),
@@ -661,7 +667,7 @@ export class Engine {
     if (!ids.length) throw new Error("Chưa có tài khoản để theo dõi.");
     await this.setAutoScope(ids, enabled);
   }
-  async setConversationAuto(id: string, enabled: boolean) {
+  async setConversationAuto(id: string, enabled: boolean | null) {
     this.conversation(id);
     this.autoRevision.set(id, (this.autoRevision.get(id) ?? 0) + 1);
     this.cancelScheduled(id);
@@ -677,11 +683,13 @@ export class Engine {
           delete draft.sendAfter;
         }
     });
-    if (enabled) this.priorityQueue.add(id);
+    if (this.autoReplyEnabled(id)) this.priorityQueue.add(id);
     this.report(
-      enabled
-        ? "Đã bật tự trả lời cho hội thoại."
-        : "Đã tắt tự trả lời cho hội thoại; các hội thoại khác tiếp tục chạy.",
+      enabled === null
+        ? "Đã đặt tự trả lời theo hệ thống cho hội thoại."
+        : enabled
+          ? "Đã bật tự trả lời cho hội thoại."
+          : "Đã tắt tự trả lời cho hội thoại; các hội thoại khác tiếp tục chạy.",
     );
   }
   private async setAutoScope(accountIds: string[], enabled: boolean) {
@@ -692,19 +700,21 @@ export class Engine {
     await this.vault.mutate((s) => {
       for (const a of s.accounts)
         if (accountIds.includes(a.id)) a.autoDiscoverReply = enabled;
-      for (const c of s.conversations)
-        if (accountIds.includes(c.accountId)) c.autoReply = enabled;
     });
     if (this.stopped || token !== this.epoch) return;
-    for (const c of this.vault.read().conversations)
-      if (enabled && accountIds.includes(c.accountId))
+    const state = this.vault.read();
+    for (const c of state.conversations)
+      if (
+        accountIds.includes(c.accountId) &&
+        isAutoReplyEnabled(c, state.accounts)
+      )
         this.priorityQueue.add(c.id);
     if (enabled || wasRunning) await this.resume();
     if (this.paused && (enabled || wasRunning)) return;
     this.report(
       enabled
-        ? "Đã bật và chạy tự trả lời cho mọi hội thoại hiện có và mới trong phạm vi đã chọn."
-        : "Đã tắt tự trả lời cho các hội thoại của tài khoản.",
+        ? "Đã bật tự trả lời mặc định; các lựa chọn riêng của hội thoại được giữ nguyên."
+        : "Đã tắt tự trả lời mặc định; các lựa chọn riêng của hội thoại được giữ nguyên.",
     );
   }
   async sendMessage(
@@ -1083,7 +1093,7 @@ export class Engine {
         token !== this.epoch ||
         (automatic &&
           (autoRevision !== (this.autoRevision.get(id) ?? 0) ||
-            !this.conversation(id).autoReply)) ||
+            !this.autoReplyEnabled(id))) ||
         latestId(this.conversation(id)) !== basedOn ||
         JSON.stringify(history(this.conversation(id))) !== context
       )
@@ -1140,7 +1150,12 @@ export class Engine {
       );
     if (profile && !profile.verified)
       throw new Error("Profile tùy chỉnh phải được kiểm chứng trước khi gửi.");
-    if (automatic && (!c.autoReply || draft.proactive || !c.pendingIds.length))
+    if (
+      automatic &&
+      (!isAutoReplyEnabled(c, state.accounts) ||
+        draft.proactive ||
+        !c.pendingIds.length)
+    )
       throw new Error("Hội thoại chưa cho phép trả lời tự động.");
     if (
       automatic &&
@@ -1168,7 +1183,7 @@ export class Engine {
       if (
         (automatic &&
           (this.paused ||
-            !this.conversation(c.id).autoReply ||
+            !this.autoReplyEnabled(c.id) ||
             autoRevision !== (this.autoRevision.get(c.id) ?? 0) ||
             this.composing.has(c.id) ||
             this.manualRequests.has(c.id))) ||
@@ -1200,7 +1215,7 @@ export class Engine {
                 !this.manualRequests.has(c.id))) &&
             this.epoch === token &&
             (!automatic ||
-              (this.conversation(c.id).autoReply &&
+              (this.autoReplyEnabled(c.id) &&
                 autoRevision === (this.autoRevision.get(c.id) ?? 0))),
           contextBound,
         );
@@ -1386,7 +1401,7 @@ export class Engine {
         state.accounts.find((a) => a.id === c.accountId)!.platform
       ];
     return Boolean(
-      c.autoReply &&
+      isAutoReplyEnabled(c, state.accounts) &&
       !this.scheduled.has(c.id) &&
       !this.composing.has(c.id) &&
       !this.manualRequests.has(c.id) &&

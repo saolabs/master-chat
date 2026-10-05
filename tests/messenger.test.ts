@@ -4,6 +4,7 @@ import vm from "node:vm";
 import { JSDOM } from "jsdom";
 import { messengerScript, messengerTimestamp } from "../src/core/messenger.ts";
 import { reconcileInbox } from "../src/core/inbox.ts";
+import { isAutoReplyEnabled } from "../src/core/auto-reply.ts";
 import { emptyState } from "../src/core/types.ts";
 import { ingest, latestId } from "../src/core/conversation.ts";
 import { messengerReadIssue } from "../src/core/messenger-readiness.ts";
@@ -356,7 +357,8 @@ test("semantic inbox snippets retain preview without turning unread labels into 
 test("first inbox scan creates baseline with auto off; repeat and same thread across accounts are isolated", () => {
   const s = stateFixture();
   assert.equal(reconcileInbox(s, "a", scan()).added.length, 1);
-  assert.equal(s.conversations[0].autoReply, false);
+  assert.equal(s.conversations[0].autoReply, null);
+  assert.equal(isAutoReplyEnabled(s.conversations[0], s.accounts), false);
   assert.equal(s.conversations[0].initialized, false);
   assert.equal(reconcileInbox(s, "a", scan()).added.length, 0);
   assert.equal(reconcileInbox(s, "b", scan()).added.length, 1);
@@ -368,7 +370,8 @@ test("new thread after baseline uses account opt-in but old unread and cutoff-mi
   s.accounts[0].autoDiscoverReply = true;
   reconcileInbox(s, "a", scan("456"));
   const c = s.conversations[1];
-  assert.equal(c.autoReply, true);
+  assert.equal(c.autoReply, null);
+  assert.equal(isAutoReplyEnabled(c, s.accounts), true);
   assert.equal(c.initialized, true);
   const cutoff = stamp + 30_000;
   const messages = [
@@ -399,7 +402,7 @@ test("new thread after baseline uses account opt-in but old unread and cutoff-mi
   assert.deepEqual(ingest(c, messages, cutoff), ["new"]);
   assert.deepEqual(ingest(c, messages, cutoff), []);
   assert.deepEqual(c.pendingIds, ["new"]);
-  assert.equal(s.conversations[0].autoReply, false);
+  assert.equal(isAutoReplyEnabled(s.conversations[0], s.accounts), true);
 });
 test("unknown-time old messages preserve DOM chronology and do not displace the newest message", () => {
   const s = stateFixture();

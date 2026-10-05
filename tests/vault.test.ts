@@ -52,6 +52,32 @@ test("corrupted vault is preserved and never silently reset", async (t) => {
   await assert.rejects(new Vault(dir, secrets).open());
   assert.deepEqual(await readFile(target), bytes);
 });
+
+test("vault roundtrip preserves inherited mode and legacy boolean overrides", async (t) => {
+  const dir = await directory(t),
+    v = new Vault(dir, secrets);
+  await v.open();
+  await v.mutate((s) => {
+    s.conversations = [null, false, true].map((autoReply, index) => ({
+      id: String(index),
+      accountId: "a",
+      platformId: String(index),
+      name: "Friend",
+      url: "",
+      messages: [],
+      initialized: false,
+      autoReply,
+      pendingIds: [],
+      summary: { text: "", coveredIds: [], revision: 0 },
+    }));
+  });
+  const reopened = new Vault(dir, secrets);
+  await reopened.open();
+  assert.deepEqual(
+    reopened.read().conversations.map((c) => c.autoReply),
+    [null, false, true],
+  );
+});
 test("missing key with existing vault cannot regenerate a new key", async (t) => {
   const dir = await directory(t),
     v = new Vault(dir, secrets);
