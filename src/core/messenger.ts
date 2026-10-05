@@ -83,6 +83,7 @@ export type NativeOptions = {
   messageId?: string;
   attachmentId?: string;
   load?: boolean;
+  nativePlayback?: boolean;
 };
 // Public rendered DOM only. No private React stores, endpoints, tokens or requests are inspected.
 export function messengerDOM(
@@ -327,6 +328,35 @@ export function messengerDOM(
   }
   const messages: NativeMessage[] = [];
   const messageNodes = new Map<string, HTMLElement>();
+  const audioPlayer = (root: Element) =>
+    Array.from(root.querySelectorAll('[role="slider"][aria-label]')).some(
+      (slider) =>
+        /am thanh|audio|voice/.test(
+          plain(slider.getAttribute("aria-label") || ""),
+        ),
+    ) &&
+    Array.from(root.querySelectorAll('button,[role="button"]')).some((button) =>
+      /^(phat|tam dung|play|pause)(?:\s|$)/.test(
+        plain(button.getAttribute("aria-label") || button.textContent || ""),
+      ),
+    );
+  const messageRoot = (node: HTMLElement): Element => {
+    const article = node.closest('[role="article"]');
+    if (article) return article;
+    // Current Messenger places the voice player beside its semantic message
+    // button. Stop before an ancestor contains another message's controls.
+    let parent = node.parentElement;
+    for (
+      let n = 0;
+      parent && parent !== document.body && n < 4;
+      n++, parent = parent.parentElement
+    ) {
+      if (nodes.some((other) => other !== node && parent!.contains(other)))
+        break;
+      if (parent.querySelector("audio") || audioPlayer(parent)) return parent;
+    }
+    return node;
+  };
   const now = options.now ?? Date.now();
   for (const node of nodes) {
     const label = norm(node.getAttribute("aria-label") ?? "");
@@ -340,7 +370,7 @@ export function messengerDOM(
       ? ("outgoing" as const)
       : ("incoming" as const);
     let text = (match[3] ?? "").trim();
-    const article = node.closest('[role="article"]') ?? node;
+    const article = messageRoot(node);
     const attachments: Attachment[] = [];
     const seenSources = new Set<string>();
     const addMedia = (
@@ -396,9 +426,10 @@ export function messengerDOM(
     );
     if (
       !attachments.some((a) => a.kind === "audio") &&
-      (/tin nhan (?:thoai|am thanh)|voice message|audio message/.test(
-        mediaLabel,
-      ) ||
+      (audioPlayer(article) ||
+        /tin nhan (?:thoai|am thanh)|voice message|audio message/.test(
+          mediaLabel,
+        ) ||
         /^(?:tin nhan (?:thoai|am thanh)|voice message|audio message)(?:\s*[\d:]+)?$/.test(
           plain(text),
         ))
@@ -439,7 +470,7 @@ export function messengerDOM(
       identity: platformId ? "platform" : "fingerprint",
       ...(attachments.length ? { attachments } : {}),
     });
-    messageNodes.set(id, node);
+    messageNodes.set(id, article as HTMLElement);
   }
   const counts = new Map<string, number>();
   for (const m of messages) counts.set(m.id, (counts.get(m.id) ?? 0) + 1);
@@ -575,6 +606,17 @@ export function messengerDOM(
     );
     if (!message || !attachment)
       throw new Error("Tệp đính kèm không còn nằm trong đúng tin nhắn.");
+    // Messenger may use a detached Audio instance rather than an <audio>
+    // descendant. Capture only playback triggered in this isolated worker for
+    // the requested message, and refuse an ambiguous second audio instance.
+    const scope = window as unknown as {
+      __masterChatVoice?: {
+        messageId: string;
+        attachmentId: string;
+        audios: Set<HTMLMediaElement>;
+        restore: () => void;
+      };
+    };
     if (!attachment.source && attachment.kind === "audio" && options.load) {
       const node = messageNodes.get(message.id)!;
       const play = Array.from(
@@ -582,9 +624,71 @@ export function messengerDOM(
           node.closest('[role="article"]') ?? node
         ).querySelectorAll<HTMLElement>('button,[role="button"]'),
       ).find((e) =>
-        /^(phat|play)(?:\s|$)/.test(plain(e.getAttribute("aria-label") || "")),
+        /^(phat|play)(?:\s|$)/.test(
+          plain(e.getAttribute("aria-label") || e.textContent || ""),
+        ),
       );
-      play?.click();
+      if (play) {
+        scope.__masterChatVoice?.restore();
+        const original = HTMLMediaElement.prototype.play;
+        const OriginalAudio = window.Audio;
+        const audios = new Set<HTMLMediaElement>();
+        // Some players cache play() before we attach. Also capture detached
+        // Audio instances created by this requested playback gesture.
+        const CapturedAudio = class extends OriginalAudio {
+          constructor(src?: string) {
+            super(src);
+            audios.add(this);
+          }
+        };
+        const capture = function (this: HTMLMediaElement) {
+          if (this instanceof HTMLAudioElement) audios.add(this);
+          return original.call(this);
+        };
+        const restore = () => {
+          if (HTMLMediaElement.prototype.play === capture)
+            HTMLMediaElement.prototype.play = original;
+          if (window.Audio === CapturedAudio) window.Audio = OriginalAudio;
+        };
+        scope.__masterChatVoice = {
+          messageId: message.id,
+          attachmentId: attachment.id,
+          audios,
+          restore,
+        };
+        HTMLMediaElement.prototype.play = capture;
+        window.Audio = CapturedAudio;
+        window.setTimeout(restore, 16000);
+        if (options.nativePlayback) {
+          play.scrollIntoView({ block: "center", inline: "nearest" });
+          const rect = play.getBoundingClientRect();
+          const x = rect.left + rect.width / 2;
+          const y = rect.top + rect.height / 2;
+          const hit = document.elementFromPoint(x, y);
+          if (!visible(play) || !hit || !(hit === play || play.contains(hit)))
+            throw new Error(
+              "Không xác định được nút phát của đúng tệp âm thanh.",
+            );
+          return { ...attachment, playPoint: { x, y } };
+        }
+        play.click();
+      }
+    }
+    const captured = scope.__masterChatVoice;
+    if (
+      !attachment.source &&
+      attachment.kind === "audio" &&
+      captured?.messageId === message.id &&
+      captured.attachmentId === attachment.id &&
+      captured.audios.size === 1
+    ) {
+      const audio = [...captured.audios][0];
+      const source = audio.currentSrc || audio.src;
+      if (source) {
+        attachment.source = source;
+        audio.pause();
+        captured.restore();
+      }
     }
     if (attachment.source)
       for (const audio of Array.from(document.querySelectorAll("audio")))

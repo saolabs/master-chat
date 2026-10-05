@@ -166,9 +166,22 @@ const commands = z.discriminatedUnion("type", [
       conversationDirection: z.string().max(12000).optional(),
     })
     .strict(),
-  ...(["style.learn", "media.retry", "conversation.backfill"] as const).map(
-    (type) => z.object({ type: z.literal(type), conversationId: id }).strict(),
+  ...(["style.learn", "conversation.backfill"] as const).map((type) =>
+    z.object({ type: z.literal(type), conversationId: id }).strict(),
   ),
+  z
+    .object({
+      type: z.literal("media.retry"),
+      conversationId: id,
+      target: z
+        .object({
+          messageId: z.string().min(1).max(2000),
+          attachmentId: z.string().min(1).max(2000),
+        })
+        .strict()
+        .optional(),
+    })
+    .strict(),
   z.object({ type: z.literal("draft.discard"), draftId: id }).strict(),
   z
     .object({
@@ -418,7 +431,7 @@ async function execute(cmd: Command) {
       await engine.learnConversationStyle(cmd.conversationId);
       break;
     case "media.retry":
-      await engine.retryMedia(cmd.conversationId);
+      await engine.retryMedia(cmd.conversationId, cmd.target);
       break;
     case "account.auto":
       await engine.setAccountAuto(cmd.accountId, cmd.enabled);

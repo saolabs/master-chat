@@ -279,3 +279,20 @@ test("real FFmpeg decodes an M4A voice fixture to mono 16 kHz WAV before the rec
   );
   assert.equal(result, "Decode verified");
 });
+
+test("Vietnamese is the default for short voice clips, with explicit auto preserved", async (t) => {
+  const old = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = old;
+  });
+  const languages: (FormDataEntryValue | null)[] = [];
+  globalThis.fetch = (async (_url, options) => {
+    languages.push((options!.body as FormData).get("language"));
+    return new Response(JSON.stringify({ text: "Xin chào" }));
+  }) as typeof fetch;
+  await transcribeAudio(localConfig(), audio);
+  await transcribeAudio(localConfig(), audio, undefined, undefined, {
+    language: "auto",
+  });
+  assert.deepEqual(languages, ["vi", null]);
+});

@@ -70,6 +70,46 @@ function rig() {
   const engine = new Engine(vault, browsers, () => {});
   return { state, engine, browsers, sent: () => sent };
 }
+test("manual AI generation waits for its own background read without blocking another conversation", async (t) => {
+  const r = rig(),
+    old = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = old;
+    r.engine.shutdown();
+  });
+  let finishRead!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    finishRead = resolve;
+  });
+  r.browsers.readConversation = async () => {
+    await gate;
+    return r.state.conversations[0].messages;
+  };
+  globalThis.fetch = (async () =>
+    new Response(
+      JSON.stringify({ choices: [{ message: { content: "Manual reply" } }] }),
+    )) as typeof fetch;
+  const internal = r.engine as unknown as {
+    observeInBackground(c: State["conversations"][number]): Promise<void>;
+  };
+  const observation = internal.observeInBackground(r.state.conversations[0]);
+  const sameThread = r.engine.generate("c");
+  const second = {
+    ...structuredClone(r.state.conversations[0]),
+    id: "other",
+    platformId: "456",
+  };
+  r.state.conversations.push(second);
+  const otherDraft = await r.engine.generate("other");
+  assert.equal(
+    r.state.drafts.find((d) => d.id === otherDraft)?.conversationId,
+    "other",
+  );
+  finishRead();
+  await observation;
+  const draft = await sameThread;
+  assert.equal(r.state.drafts.find((d) => d.id === draft)?.conversationId, "c");
+});
 test("AI transport sets redirect=error and uses chosen role model", async (t) => {
   const fetchBefore = globalThis.fetch;
   t.after(() => {
@@ -2281,3 +2321,60 @@ test("a fallback writer cannot also serve as reviewer for that draft", async (t)
     /khác model viết/,
   );
 });
+
+for (const fails of [false, true]) {
+  test(`explicit audio retry ${fails ? "preserves cached text on failure" : "replaces summarized text and invalidates derived context"}`, async (t) => {
+    const r = rig(),
+      old = globalThis.fetch;
+    t.after(() => {
+      globalThis.fetch = old;
+      r.engine.shutdown();
+    });
+    const c = r.state.conversations[0];
+    c.messages[0].attachments = [
+      { id: "voice", kind: "audio", analysis: "Sai lời", analyzedAt: 1 },
+    ];
+    c.summary = { text: "Tóm tắt lời sai", coveredIds: ["m1"], revision: 2 };
+    r.state.drafts.push({
+      id: "d",
+      conversationId: "c",
+      text: "Old draft",
+      basedOnId: "m1",
+      triggerIds: [],
+      proactive: false,
+      status: "draft",
+      createdAt: 1,
+    });
+    r.state.ai.providers[0].models.push("whisper-test");
+    r.state.response = {
+      media: {
+        transcription: { mode: "provider", language: "vi" },
+        audioModel: { providerId: "p", modelId: "whisper-test" },
+      },
+    };
+    let loads = 0;
+    r.browsers.readAttachment = async (_c, messageId, attachmentId) => {
+      loads++;
+      assert.equal(messageId, "m1");
+      assert.equal(attachmentId, "voice");
+      if (fails) throw Error("Không tải được audio");
+      return { kind: "audio", mimeType: "audio/mp4", data: "AQID" };
+    };
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ text: "Lời đúng" }))) as typeof fetch;
+    const retry = r.engine.retryMedia("c", {
+      messageId: "m1",
+      attachmentId: "voice",
+    });
+    if (fails) await assert.rejects(retry, /Không tải được/);
+    else await retry;
+    assert.equal(loads, 1);
+    assert.equal(
+      c.messages[0].attachments[0].analysis,
+      fails ? "Sai lời" : "Lời đúng",
+    );
+    assert.equal(c.summary.text, fails ? "Tóm tắt lời sai" : "");
+    assert.equal(r.state.drafts[0].status, fails ? "draft" : "stale");
+    assert.equal(r.sent(), 0);
+  });
+}

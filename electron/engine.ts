@@ -83,6 +83,7 @@ export class Engine {
   private syncBusy = false;
   private stopped = false;
   private locks = new Set<string>();
+  private observations = new Map<string, Promise<void>>();
   private composing = new Set<string>();
   private manualRequests = new Set<string>();
   private scheduled = new Map<
@@ -237,6 +238,15 @@ export class Engine {
     const c = state.conversations.find((c) => c.id === id);
     return Boolean(c && isAutoReplyEnabled(c, state.accounts));
   }
+  private observeInBackground(c: Conversation) {
+    this.locks.add(c.id);
+    const task = this.observe(c).finally(() => {
+      this.observations.delete(c.id);
+      this.locks.delete(c.id);
+    });
+    this.observations.set(c.id, task);
+    return task;
+  }
   private async observe(c: Conversation, live = false) {
     const s = this.vault.read(),
       a = s.accounts.find((a) => a.id === c.accountId)!;
@@ -385,16 +395,22 @@ export class Engine {
     this.scheduled.set(draft.conversationId, { draftId, timer });
     this.changed();
   }
-  private async prepareMedia(id: string, token: number, signal: AbortSignal) {
+  private async prepareMedia(
+    id: string,
+    token: number,
+    signal: AbortSignal,
+    target?: { messageId: string; attachmentId: string },
+  ) {
     const state = this.vault.read(),
       c = this.conversation(id);
-    const relevant = c.messages.filter(
-      (m) => !c.summary.coveredIds.includes(m.id),
+    const relevant = c.messages.filter((m) =>
+      target ? m.id === target.messageId : !c.summary.coveredIds.includes(m.id),
     );
-    if (state.response?.media?.enabled !== false) {
+    if (target || state.response?.media?.enabled !== false) {
       for (const m of relevant)
         for (const a of m.attachments ?? []) {
-          if (a.analysis || a.error) continue;
+          if (target ? a.id !== target.attachmentId : a.analysis || a.error)
+            continue;
           signal.throwIfAborted();
           try {
             const payload = await this.browsers.readAttachment(
@@ -418,11 +434,26 @@ export class Engine {
             if (token !== this.epoch)
               throw new Error("Lượt đọc media đã bị dừng.");
             await this.vault.mutate((s) => {
-              const saved = s.conversations
-                .find((c) => c.id === id)
-                ?.messages.find((x) => x.id === m.id)
+              const conversation = s.conversations.find((c) => c.id === id);
+              const saved = conversation?.messages
+                .find((x) => x.id === m.id)
                 ?.attachments?.find((x) => x.id === a.id);
-              if (saved) {
+              if (saved && conversation) {
+                if (saved.analysis && saved.analysis !== analysis) {
+                  if (conversation.summary.coveredIds.includes(m.id))
+                    conversation.summary = {
+                      text: "",
+                      coveredIds: [],
+                      revision: conversation.summary.revision + 1,
+                    };
+                  delete conversation.contactProfile;
+                  delete conversation.learnedStyle;
+                  delete conversation.profileAttemptKey;
+                  delete conversation.profileError;
+                  for (const draft of s.drafts)
+                    if (draft.conversationId === id && draft.status === "draft")
+                      draft.status = "stale";
+                }
                 saved.analysis = analysis;
                 saved.analyzedAt = Date.now();
                 delete saved.error;
@@ -439,10 +470,12 @@ export class Engine {
                 saved.error =
                   e instanceof Error ? e.message : "Không đọc được tệp.";
             });
+            if (target) throw e;
           }
           this.changed();
         }
     }
+    if (target) return;
     const current = this.conversation(id);
     if (
       current.messages.some(
@@ -455,7 +488,17 @@ export class Engine {
         "Chưa đọc được ảnh/âm thanh trong ngữ cảnh. Kiểm tra model hoặc bấm Đọc lại tệp trước khi tạo phản hồi.",
       );
   }
-  async retryMedia(id: string) {
+  async retryMedia(
+    id: string,
+    target?: { messageId: string; attachmentId: string },
+  ) {
+    if (
+      target &&
+      !this.conversation(id)
+        .messages.find((m) => m.id === target.messageId)
+        ?.attachments?.some((a) => a.id === target.attachmentId)
+    )
+      throw new Error("Không tìm thấy tệp cần đọc lại.");
     if (this.locks.has(id)) throw new Error("Hội thoại đang xử lý.");
     this.locks.add(id);
     try {
@@ -465,7 +508,7 @@ export class Engine {
         for (const m of c.messages)
           for (const a of m.attachments ?? []) if (!a.analysis) delete a.error;
       });
-      await this.prepareMedia(id, this.epoch, this.controller.signal);
+      await this.prepareMedia(id, this.epoch, this.controller.signal, target);
       this.report("Đã đọc và lưu nội dung tệp; không gửi tin.");
     } finally {
       this.locks.delete(id);
@@ -995,6 +1038,10 @@ export class Engine {
     goal?: string,
     automatic = false,
   ): Promise<string> {
+    if (!automatic) {
+      const observation = this.observations.get(id);
+      if (observation) await observation;
+    }
     if (this.locks.has(id)) throw new Error("Hội thoại này đang xử lý.");
     this.locks.add(id);
     const autoRevision = this.autoRevision.get(id) ?? 0;
@@ -1374,12 +1421,7 @@ export class Engine {
         if (this.stopped) break;
         if (this.locks.has(c.id)) continue;
         try {
-          this.locks.add(c.id);
-          try {
-            await this.observe(c);
-          } finally {
-            this.locks.delete(c.id);
-          }
+          await this.observeInBackground(c);
           this.priorityQueue.delete(c.id);
           observed.push(c.id);
         } catch (e) {
@@ -1473,12 +1515,7 @@ export class Engine {
       this.autoReplyReady(this.conversation(id), this.vault.read());
     if (!eligible()) return;
     if (!observed.includes(id)) {
-      this.locks.add(id);
-      try {
-        await this.observe(this.conversation(id));
-      } finally {
-        this.locks.delete(id);
-      }
+      await this.observeInBackground(this.conversation(id));
     }
     if (!eligible()) return;
     const current = this.conversation(id),

@@ -16,17 +16,17 @@ tar -xzf "$master_chat_work/source.tar.gz" -C "$master_chat_work/source" --strip
 "$master_chat_cmake" --build "$master_chat_work/build" --target whisper-cli -j 4
 cp "$master_chat_work/build/bin/whisper-cli" "$master_chat_target/whisper-cli"
 cp "$master_chat_work/source/LICENSE" "$master_chat_target/WHISPER-LICENSE.txt"
-if [ ! -f "$master_chat_target/ggml-base.bin" ]; then
-  curl --fail --location --silent --show-error https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin -o "$master_chat_target/ggml-base.bin.part"
+if [ ! -f "$master_chat_target/ggml-large-v3-turbo-q5_0.bin" ]; then
+  curl --fail --location --silent --show-error https://huggingface.co/ggerganov/whisper.cpp/resolve/98aa99a0a9db05ae2342309f5096248665f7cba3/ggml-large-v3-turbo-q5_0.bin -o "$master_chat_target/ggml-large-v3-turbo-q5_0.bin.part"
 else
-  cp "$master_chat_target/ggml-base.bin" "$master_chat_target/ggml-base.bin.part"
+  cp "$master_chat_target/ggml-large-v3-turbo-q5_0.bin" "$master_chat_target/ggml-large-v3-turbo-q5_0.bin.part"
 fi
 node - "$master_chat_target" <<'JS'
 const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto');
-const root = process.argv[2], part = path.join(root, 'ggml-base.bin.part');
+const root = process.argv[2], part = path.join(root, 'ggml-large-v3-turbo-q5_0.bin.part');
 const hash = crypto.createHash('sha256').update(fs.readFileSync(part)).digest('hex');
-if(hash !== '60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe') throw Error('Model SHA256 mismatch; refusing to package');
-fs.renameSync(part, path.join(root, 'ggml-base.bin'));
-fs.writeFileSync(path.join(root,'runtime.json'),JSON.stringify({whisperVersion:'v1.9.4', model:'base multilingual', modelSHA256:hash, modelSource:'https://huggingface.co/ggerganov/whisper.cpp', platform:process.platform, arch:process.arch},null,2));
+if(hash !== '394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2') throw Error('Model SHA256 mismatch; refusing to package');
+fs.renameSync(part, path.join(root, 'ggml-large-v3-turbo-q5_0.bin'));
+fs.writeFileSync(path.join(root,'runtime.json'),JSON.stringify({whisperVersion:'v1.9.4', model:'large-v3-turbo-q5_0 multilingual', modelSHA256:hash, modelSource:'https://huggingface.co/ggerganov/whisper.cpp', platform:process.platform, arch:process.arch},null,2));
 console.log('Offline speech runtime ready:', root);
 JS

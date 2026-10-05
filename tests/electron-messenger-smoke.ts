@@ -1,6 +1,7 @@
 // Isolated Chromium fixture: no live Facebook requests, user credentials or messages.
 import { app, BrowserWindow } from "electron";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { Browsers } from "../electron/browser.ts";
 import {
   emptyState,
@@ -51,18 +52,29 @@ app.whenReady().then(async () => {
     const fixtureTimestamp = new Date().toISOString();
     let serverText = "Test incoming";
     let profileFixture = false;
+    let pinOnLoad = false;
     session.protocol.handle("https", (request) => {
       if (new URL(request.url).hostname === "scontent.fbcdn.net")
         return new Response(new Uint8Array([1, 2, 3]), {
           headers: { "content-type": "image/png" },
         });
+      if (pinOnLoad)
+        return new Response(
+          `<!doctype html><meta charset="utf-8"><div id="ready" hidden><div role="grid" aria-label="Đoạn chat"><a aria-current="page" href="/messages/t/123/"><span dir="auto">Fixture Recipient</span></a></div><div role="article"><time datetime="${fixtureTimestamp}"></time><div role="button" aria-label="Tin nhắn do Fixture Recipient gửi lúc 10:19: Restored on startup"></div></div><div contenteditable="true" role="textbox" aria-label="Viết cho Fixture Recipient"></div></div><main id="restore"><h1>Nhập mã PIN</h1><p>Đồng bộ lịch sử đoạn chat</p><input type="password" maxlength="6"><button disabled>Tiếp tục</button></main><script>window.pinSubmits=0;const modal=document.querySelector('#restore');modal.querySelector('input').addEventListener('input',(event)=>{if(event.isTrusted)setTimeout(()=>modal.querySelector('button').disabled=false,100);});modal.querySelector('button').onclick=()=>{window.pinSubmits++;if(modal.querySelector('input').value==='012345'){modal.remove();document.querySelector('#ready').hidden=false;}};</script>`,
+          { headers: { "content-type": "text/html;charset=utf-8" } },
+        );
       if (profileFixture)
         return new Response(
           `<!doctype html><meta charset="utf-8"><section data-thread="123"><div class="msg" data-id="profile-in" data-dir="in" data-time="${fixtureTimestamp}"><span class="text">Profile incoming</span></div></section><div contenteditable="true" role="textbox"></div><button id="send">Send</button><script>window.sends=0;document.querySelector('#send').onclick=()=>{window.sends++;const composer=document.querySelector('[contenteditable]');const msg=document.createElement('div');msg.className='msg';msg.dataset.id='profile-out';msg.dataset.dir='out';msg.dataset.time=new Date().toISOString();const text=document.createElement('span');text.className='text';text.textContent=composer.textContent;msg.append(text);document.querySelector('section').append(msg);composer.textContent='';};</script>`,
           { headers: { "content-type": "text/html;charset=utf-8" } },
         );
       return new Response(
-        `<!doctype html><meta charset="utf-8"><style>body{font-family:sans-serif} [role=button],button,[contenteditable]{display:block;min-height:30px} [contenteditable]{border:1px solid gray} </style><div role="grid" aria-label="Đoạn chat"><div role="row"><a aria-current="page" href="/messages/t/123/"><span dir="auto">Fixture Recipient</span><span>Tin nhắn chưa đọc</span></a></div></div><section id="timeline"><div role="article"><time datetime="${fixtureTimestamp}"></time><div role="button" aria-label="Nhập, Tin nhắn do Fixture Recipient gửi lúc 10:19: ${serverText}"></div></div></section><div contenteditable="true" role="textbox" aria-label="Viết cho Fixture Recipient"></div><button aria-label="Gửi lượt thích" id="like"></button><button aria-label="Nhấn Enter để gửi" id="send"></button><script>window.inputs=0;window.sends=0;window.likes=0;const composer=document.querySelector('[contenteditable]');composer.addEventListener('input',()=>window.inputs++);document.querySelector('#like').onclick=()=>window.likes++;document.querySelector('#send').onclick=()=>{window.sends++;const article=document.createElement('div');article.setAttribute('role','article');const time=document.createElement('time');time.setAttribute('datetime',new Date().toISOString());article.append(time);const node=document.createElement('div');node.setAttribute('role','button');node.setAttribute('aria-label','Nhập, Tin nhắn do Bạn gửi lúc 10:20: '+composer.textContent);article.append(node);document.querySelector('#timeline').append(article);composer.textContent='';};</script>`,
+        `<!doctype html><meta charset="utf-8"><style>body{font-family:sans-serif} [role=button],button,[contenteditable]{display:block;min-height:30px} [contenteditable]{border:1px solid gray} </style><div role="grid" aria-label="Đoạn chat"><div role="row"><a aria-current="page" href="/messages/t/123/"><span dir="auto">Fixture Recipient</span><span>Tin nhắn chưa đọc</span></a></div></div><section id="timeline"><div role="article"><time datetime="${fixtureTimestamp}"></time><div role="button" aria-label="Nhập, Tin nhắn do Fixture Recipient gửi lúc 10:19: ${serverText}"></div></div></section><div contenteditable="true" role="textbox" aria-label="Viết cho Fixture Recipient"></div><button aria-label="Gửi lượt thích" id="like"></button><button aria-label="Nhấn Enter để gửi" id="send"></button><script>window.inputs=0;window.sends=0;window.likes=0;const composer=document.querySelector('[contenteditable]');composer.addEventListener('input',()=>window.inputs++);document.querySelector('#like').onclick=()=>window.likes++;document.querySelector('#send').onclick=()=>{window.sends++;const article=document.createElement('div');article.setAttribute('role','article');const time=document.createElement('time');time.setAttribute('datetime',new Date().toISOString());article.append(time);const node=document.createElement('div');node.setAttribute('role','button');node.setAttribute('aria-label','Nhập, Tin nhắn do Bạn gửi lúc 10:20: '+composer.textContent);article.append(node);document.querySelector('#timeline').append(article);composer.textContent='';};</script>`.replaceAll(
+          "/messages/t/123/",
+          new URL(request.url).pathname.includes("/456/")
+            ? "/messages/t/456/"
+            : "/messages/t/123/",
+        ),
         { headers: { "content-type": "text/html;charset=utf-8" } },
       );
     });
@@ -82,6 +94,18 @@ app.whenReady().then(async () => {
       pendingIds: [],
       summary: { text: "", coveredIds: [], revision: 0 },
     };
+    let releaseFixture!: () => void, fixtureStarted!: () => void;
+    const fixtureGate = new Promise<void>((resolve) => {
+      releaseFixture = resolve;
+    });
+    const fixtureReady = new Promise<void>((resolve) => {
+      fixtureStarted = resolve;
+    });
+    const heldFixture = b.withConversationTask(c, async () => {
+      fixtureStarted();
+      await fixtureGate;
+    });
+    await fixtureReady;
     const raw = await b.readConversation(c);
     assert.equal(raw.length, 1);
     assert.equal(raw[0].text, "Test incoming");
@@ -91,7 +115,43 @@ app.whenReady().then(async () => {
     c.initialized = true;
     const worker = (
       b as unknown as { workers: Map<string, Electron.WebContentsView> }
-    ).workers.get(account.id)!.webContents;
+    ).workers.get(c.id)!.webContents;
+    // Closing a page with a stalled executeJavaScript must release the PIN
+    // queue; a different page in the account can still restore afterwards.
+    const abandoned = new EventEmitter() as EventEmitter & {
+      id: number;
+      isDestroyed(): boolean;
+      getURL(): string;
+      executeJavaScript(): Promise<never>;
+    };
+    abandoned.id = -1;
+    let destroyed = false;
+    abandoned.isDestroyed = () => destroyed;
+    abandoned.getURL = () => "https://www.facebook.com/messages/";
+    let entered!: () => void;
+    const enteredProbe = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    abandoned.executeJavaScript = () => {
+      entered();
+      return new Promise<never>(() => {});
+    };
+    const restoreAbandoned = (
+      b as unknown as {
+        restorePin(wc: Electron.WebContents, a: Account): Promise<string>;
+      }
+    ).restorePin.bind(b);
+    const stalled = restoreAbandoned(
+      abandoned as unknown as Electron.WebContents,
+      account,
+    );
+    await enteredProbe;
+    destroyed = true;
+    abandoned.emit("destroyed");
+    assert.equal(await stalled, "blocked");
+    assert.equal(abandoned.listenerCount("destroyed"), 0);
+    assert.equal(await restoreAbandoned(worker, account), "absent");
+    assert.equal(state.accounts[0].pinAutoFillBlocked, undefined);
     // A different conversation can be visited between Engine.observe and its queued send.
     await worker.loadURL("https://www.facebook.com/messages/t/999/");
     await assert.rejects(
@@ -150,6 +210,18 @@ app.whenReady().then(async () => {
     );
     assert.equal(race.sends, 1);
     assert.equal(race.text, "Race reply");
+    const uncertainTab = b
+      .list()
+      .find((tab) => tab.status === "Cần kiểm tra kết quả gửi");
+    assert.ok(uncertainTab);
+    const uncertainWindow = BrowserWindow.getAllWindows().find(
+      (win) => win !== host,
+    )!;
+    const uncertainClosed = new Promise<void>((resolve) =>
+      uncertainWindow.once("closed", resolve),
+    );
+    b.close(uncertainTab.id);
+    await uncertainClosed;
     // Human-approved text is not tied to the AI draft's last-message context.
     await worker.executeJavaScript(
       `document.querySelector('[contenteditable]').textContent=''`,
@@ -195,9 +267,7 @@ app.whenReady().then(async () => {
     await assert.rejects(b.readConversation(c), /hộp thoại/);
     assert.equal(pauses, beforeTransient);
     assert.equal(
-      b
-        .list()
-        .some((tab) => tab.status === "Cần xử lý hộp thoại trong cửa sổ này"),
+      b.list().some((tab) => tab.title.endsWith("Messenger cần kiểm tra")),
       false,
     );
     await worker.executeJavaScript(
@@ -205,9 +275,7 @@ app.whenReady().then(async () => {
     );
     await b.readConversation(c);
     assert.equal(
-      b
-        .list()
-        .some((tab) => tab.status === "Cần xử lý hộp thoại trong cửa sổ này"),
+      b.list().some((tab) => tab.title.endsWith("Messenger cần kiểm tra")),
       false,
     );
     await worker.executeJavaScript(
@@ -216,7 +284,7 @@ app.whenReady().then(async () => {
     await assert.rejects(b.readConversation(c), /Khôi phục lịch sử chat/);
     const verificationTab = b
       .list()
-      .find((tab) => tab.status === "Cần xử lý hộp thoại trong cửa sổ này")!;
+      .find((tab) => tab.title.endsWith("Messenger cần kiểm tra"))!;
     assert.ok(verificationTab);
     assert.ok(pauses > 0);
     await assert.rejects(b.readConversation(c), /đóng cửa sổ/);
@@ -247,11 +315,28 @@ app.whenReady().then(async () => {
     assert.equal(await worker.executeJavaScript("window.pinEvents"), 6);
     assert.equal(state.accounts[0].pinAutoFillBlocked, false);
     assert.equal(
-      b
-        .list()
-        .some((tab) => tab.status === "Cần xử lý hộp thoại trong cửa sổ này"),
+      b.list().some((tab) => tab.title.endsWith("Messenger cần kiểm tra")),
       false,
     );
+    // A widget that clears the entered PIN without a confirmed result must not
+    // release the retry guard just because its input is empty again.
+    await worker.executeJavaScript(
+      `(()=>{window.pinEvents=0;const modal=document.createElement('div');modal.id='restore-pin';modal.setAttribute('role','dialog');modal.innerHTML='<h2>Nhập mã PIN để khôi phục đoạn chat của bạn</h2><input type="password" maxlength="6">';modal.addEventListener('input',(event)=>{if(event.isTrusted){window.pinEvents++;modal.querySelector('input').value='';}});document.body.append(modal);})()`,
+    );
+    const clearedRestore = (
+      b as unknown as {
+        restorePin(wc: Electron.WebContents, a: Account): Promise<string>;
+      }
+    ).restorePin.bind(b);
+    assert.equal(await clearedRestore(worker, account), "blocked");
+    assert.equal(state.accounts[0].pinAutoFillBlocked, true);
+    assert.equal(await clearedRestore(worker, account), "blocked");
+    assert.equal(await worker.executeJavaScript("window.pinEvents"), 1);
+    await worker.executeJavaScript(
+      `document.querySelector('#restore-pin').remove()`,
+    );
+    state.accounts[0].pinAutoFillBlocked = false;
+    state.accounts[0].pinRestorePending = false;
     // A rejected PIN is durably blocked, and concurrent calls share the same single attempt.
     await worker.executeJavaScript(
       `(()=>{window.pinEvents=0;const modal=document.createElement('div');modal.id='restore-pin';modal.setAttribute('role','dialog');modal.innerHTML='<h2>Nhập mã PIN để khôi phục đoạn chat của bạn</h2><input type="password" maxlength="6"><p></p>';modal.addEventListener('input',()=>{window.pinEvents++;modal.querySelector('p').textContent='Mã PIN không chính xác';});document.body.append(modal);})()`,
@@ -347,6 +432,45 @@ app.whenReady().then(async () => {
     );
     assert.equal(voicePayload.data, "BAUG");
     assert.equal(voicePayload.mimeType, "audio/mp4");
+    // A detached player starts only from trusted Chromium input, then exposes
+    // its blob without placing an audio element in the message DOM.
+    await worker.executeJavaScript(
+      `(()=>{window.voiceClicks=0;HTMLMediaElement.prototype.play=function(){return Promise.resolve()};const cachedPlay=HTMLMediaElement.prototype.play;window.fixtureAudio=window.Audio;const voice=document.createElement('div');voice.setAttribute('role','article');voice.setAttribute('data-message-id','fixture-detached-voice');voice.innerHTML='<time datetime="'+new Date().toISOString()+'"></time><div role="button" aria-label="Tin nhắn do Fixture Recipient gửi lúc 10:25: Tin nhắn thoại"></div><button>Phát</button>';voice.querySelector('button').onclick=(event)=>{if(!event.isTrusted)return;window.voiceClicks++;const audio=new Audio(URL.createObjectURL(new Blob([new Uint8Array([7,8,9])],{type:'audio/mp4'})));void (window.useCachedPlay ? cachedPlay.call(audio) : audio.play());};document.querySelector('#timeline').append(voice);})()`,
+    );
+    const detachedVoice = (await b.readConversation(c)).find(
+      (m) => m.id === "fixture-detached-voice",
+    )!;
+    assert.equal(
+      (
+        await b.readAttachment(
+          c,
+          detachedVoice.id,
+          detachedVoice.attachments![0].id,
+        )
+      ).data,
+      "BwgJ",
+    );
+    assert.equal(await worker.executeJavaScript("window.voiceClicks"), 1);
+    assert.equal(
+      await worker.executeJavaScript("window.Audio === window.fixtureAudio"),
+      true,
+    );
+    await worker.executeJavaScript("window.useCachedPlay = true");
+    assert.equal(
+      (
+        await b.readAttachment(
+          c,
+          detachedVoice.id,
+          detachedVoice.attachments![0].id,
+        )
+      ).data,
+      "BwgJ",
+    );
+    assert.equal(await worker.executeJavaScript("window.voiceClicks"), 2);
+    assert.equal(
+      await worker.executeJavaScript("window.Audio === window.fixtureAudio"),
+      true,
+    );
     // Current Messenger can omit aria-current. A rendered recipient region +
     // composer + unique inbox URL still binds the thread; stale regions do not.
     const noMarker = `(()=>{document.querySelector('a[aria-current]').removeAttribute('aria-current');const region=document.createElement('section');region.setAttribute('aria-label','Cuộc trò chuyện với Fixture Recipient');for(const node of [...document.querySelectorAll('#timeline,[contenteditable],button')])region.append(node);document.body.append(region);})()`;
@@ -467,6 +591,136 @@ app.whenReady().then(async () => {
       secure: true,
     });
     await assert.rejects(b.readConversation(c), /Phiên Facebook không khớp/);
+    releaseFixture();
+    await heldFixture;
+    assert.equal(
+      (b as unknown as { workers: Map<string, unknown> }).workers.size,
+      0,
+    );
+    await session.cookies.set({
+      url: "https://www.facebook.com",
+      name: "c_user",
+      value: "fixture-user",
+      domain: ".facebook.com",
+      secure: true,
+    });
+    // Separate conversations have independent pages in the same authenticated session.
+    // A stalled browser task must not prevent another thread from finishing.
+    profileFixture = false;
+    const other = {
+      ...c,
+      id: "other-conversation",
+      platformId: "456",
+      url: "https://www.facebook.com/messages/t/456/",
+    };
+    let releaseFirst!: () => void, firstStarted!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const started = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    const firstTask = b.withConversationTask(c, async () => {
+      firstStarted();
+      await gate;
+      return b.readConversation(c);
+    });
+    await started;
+    try {
+      const secondResult = await Promise.race([
+        b.withConversationTask(other, async () => {
+          const messages = await b.readConversation(other);
+          await b.send(
+            {
+              ...other,
+              messages: messages.map((m) => ({ ...m, baseline: true })),
+            },
+            undefined,
+            "Concurrent second-thread reply",
+            messages.at(-1)!.id,
+            () => true,
+          );
+          const view = (
+            b as unknown as { workers: Map<string, Electron.WebContentsView> }
+          ).workers.get(other.id)!;
+          assert.ok(view.webContents.getURL().includes("/456/"));
+          assert.equal(
+            await view.webContents.executeJavaScript("window.sends"),
+            1,
+          );
+          return messages;
+        }),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error("Second conversation blocked by first")),
+            5000,
+          ),
+        ),
+      ]);
+      assert.equal(secondResult[0].text, serverText);
+      const workers = (
+        b as unknown as { workers: Map<string, Electron.WebContentsView> }
+      ).workers;
+      assert.equal(workers.has(c.id), true);
+      assert.equal(workers.has(other.id), false);
+    } finally {
+      releaseFirst();
+    }
+    await firstTask;
+    assert.equal(
+      (b as unknown as { workers: Map<string, unknown> }).workers.size,
+      0,
+    );
+    assert.equal(
+      (b as unknown as { monitors: Map<string, unknown> }).monitors.size,
+      1,
+    );
+    // Reopening a page with a saved PIN restores a full-page prompt automatically.
+    // The button enables after React's input update, not synchronously during fill.
+    pinOnLoad = true;
+    state.accounts[0].pinAutoFillBlocked = false;
+    state.accounts[0].pinRestorePending = false;
+    await b.withConversationTask(c, async () => {
+      const restored = await b.readConversation(c);
+      assert.equal(restored[0].text, "Restored on startup");
+      const view = (
+        b as unknown as { workers: Map<string, Electron.WebContentsView> }
+      ).workers.get(c.id)!;
+      assert.equal(
+        await view.webContents.executeJavaScript("window.pinSubmits"),
+        1,
+      );
+      assert.equal(state.accounts[0].pinAutoFillBlocked, false);
+      assert.equal(state.accounts[0].pinRestorePending, false);
+      // A previously pending success is recognized even by a fresh browser manager.
+      state.accounts[0].pinAutoFillBlocked = true;
+      state.accounts[0].pinRestorePending = true;
+      const reopened = new Browsers(
+        host,
+        vault,
+        () => {},
+        () => {},
+      );
+      const restoreAfterReopen = (
+        reopened as unknown as {
+          restorePin(wc: Electron.WebContents, a: Account): Promise<string>;
+        }
+      ).restorePin.bind(reopened);
+      assert.equal(
+        await restoreAfterReopen(view.webContents, account),
+        "absent",
+      );
+      assert.equal(state.accounts[0].pinAutoFillBlocked, false);
+      assert.equal(state.accounts[0].pinRestorePending, false);
+    });
+    assert.equal(
+      (b as unknown as { workers: Map<string, unknown> }).workers.size,
+      0,
+    );
+    b.invalidateSync(account.id);
+    const restoredInbox = await b.scanInbox(account.id);
+    assert.equal(restoredInbox.threads.length, 1);
+    assert.equal(state.accounts[0].pinAutoFillBlocked, false);
     console.log(
       "Chromium fixture passed: virtualized inbox recipient proof, transient modal recovery, native/profile queue-local send and echo, pre-send failure classification, reconnect refresh, draft preservation, DOM/account guards, media, history and PIN no-retry guard.",
     );

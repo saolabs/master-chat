@@ -82,7 +82,7 @@ Vì vậy, dấu **chưa đọc** không đồng nghĩa với quyền tự trả
 | --------------------- | ------------------------------------------------------------------------------------ |
 | Tab/cửa sổ người dùng | Cho người dùng xem và thao tác Messenger; có thể mở nhiều tab hoặc tách cửa sổ.      |
 | Inbox monitor         | Quét danh sách hội thoại của một account, độc lập với tab người dùng.                |
-| Worker                | Mở lần lượt các thread để đọc lịch sử và thực hiện gửi.                              |
+| Worker                | Tab riêng cho mỗi thread đang đọc/gửi, tự đóng khi xong.                              |
 | Live view             | Giữ hội thoại đang xem để cập nhật tin mới; không bị worker chuyển sang thread khác. |
 
 Các bề mặt của cùng account dùng chung phiên account trong ứng dụng. Account khác có phiên tách riêng. Master Chat không tự nhập phiên từ Chrome mà người dùng đang mở bên ngoài.
@@ -103,9 +103,9 @@ Trước khi đọc/gửi, browser kiểm tra danh tính Facebook của phiên q
 
 PIN là thông tin khôi phục lịch sử Messenger, khác với mật khẩu Facebook và OTP. Người dùng có thể lưu PIN 6 chữ số trong vault và bật tự nhập riêng cho account.
 
-Tự nhập chỉ thực hiện khi bộ nhận diện thấy hộp thoại khôi phục PIN được hỗ trợ trên Messenger chính thức, phiên account đúng và control trống. Ứng dụng không dùng PIN này cho form tạo/đổi/reset PIN hoặc OTP và không ghi đè nội dung người dùng đang nhập.
+Tự nhập chỉ thực hiện khi bộ nhận diện thấy hộp thoại hoặc trang khôi phục PIN được hỗ trợ trên Messenger chính thức, phiên account đúng và control trống. Ứng dụng không dùng PIN này cho form tạo/đổi/reset PIN hoặc OTP và không ghi đè nội dung người dùng đang nhập.
 
-Trước khi điền PIN, ứng dụng lưu `pinAutoFillBlocked = true`. Nếu PIN sai, timeout hoặc tiến trình bị ngắt, cờ này ngăn thử tự động liên tục, kể cả sau restart. Chỉ khi hộp thoại biến mất và Messenger sẵn sàng qua các lần kiểm tra xác nhận, cờ mới được gỡ. Người dùng cũng có thể kiểm tra rồi lưu lại PIN/cấu hình để cho phép thử lại.
+Trước khi điền PIN, ứng dụng lưu `pinAutoFillBlocked = true` và `pinRestorePending = true`. Nhiều tab dùng chung một lượt thử PIN theo account; nếu nút xác nhận chưa bật, ứng dụng chờ nút sẵn sàng và chỉ xác nhận khi giá trị vẫn đúng PIN vừa điền. Nếu PIN sai, timeout hoặc tiến trình bị ngắt, cờ này ngăn thử tự động liên tục, kể cả sau restart. Chỉ khi màn hình PIN biến mất và Messenger sẵn sàng qua các lần kiểm tra xác nhận, hai cờ mới được gỡ, kể cả khi kết quả được nhận ra ở lần mở sau. PIN bị từ chối xóa cờ đang chờ nhưng giữ cờ chặn. Người dùng cũng có thể kiểm tra rồi lưu lại PIN/cấu hình để cho phép thử lại.
 
 Nếu không khôi phục được, người dùng xử lý tại cửa sổ xác minh. Sau khi hoàn tất, kiểm tra trạng thái rồi chủ động resume nếu engine đang dừng. Hoàn tất PIN không tự cấp quyền bật lại engine.
 
@@ -468,7 +468,8 @@ Pause tăng epoch và hủy request AI đang được quản lý bằng AbortCon
 - `busy` ngăn hai tick engine chạy chồng.
 - `liveBusy` ngăn hai lượt live read chồng.
 - Lock theo conversation ngăn các thao tác engine chính cùng xử lý một thread.
-- Hàng thao tác theo account tuần tự hóa monitor/worker sử dụng cùng account.
+- Hàng thao tác theo conversation tuần tự hóa đọc/gửi của chính thread đó. Các thread khác dùng tab riêng, tối đa ba worker cùng lúc cho mỗi account; inbox monitor có hàng riêng. Worker tự đóng sau công việc, trừ cửa sổ cần xác minh hoặc kiểm tra kết quả gửi.
+- Tạo nháp thủ công chờ lượt đọc nền của chính thread trước khi lấy lock; trạng thái bận trên renderer chỉ khóa hội thoại đang thao tác.
 - Live view là bề mặt riêng để cập nhật khi worker đang đọc thread khác hoặc AI đang soạn.
 - Vault tuần tự hóa mutation để ghi dữ liệu nhất quán.
 

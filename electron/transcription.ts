@@ -75,7 +75,7 @@ function validateTranscript(text: unknown) {
   return text.trim();
 }
 function languageCode(value?: string) {
-  const code = value?.trim().toLowerCase() || "auto";
+  const code = value?.trim().toLowerCase() || "vi";
   if (!/^(auto|[a-z]{2,3})$/.test(code))
     throw new Error("Ngôn ngữ phiên âm cần mã như vi, en hoặc auto.");
   return code;
@@ -109,6 +109,9 @@ async function modelPath(configured?: string) {
   const candidates = configured?.trim()
     ? [configured.trim()]
     : [
+        ...runtimeRoots().map((root) =>
+          path.join(root, "ggml-large-v3-turbo-q5_0.bin"),
+        ),
         ...runtimeRoots().map((root) => path.join(root, "ggml-base.bin")),
         path.join(homedir(), ".cache/whisper/ggml-base.bin"),
         path.join(homedir(), ".local/share/whisper.cpp/models/ggml-base.bin"),
@@ -122,7 +125,7 @@ async function modelPath(configured?: string) {
     } catch {}
   }
   throw new Error(
-    "Chưa có model Whisper local. Chọn tệp ggml đa ngôn ngữ trong Cấu hình AI → Phiên âm (ví dụ ggml-base.bin).",
+    "Chưa có model Whisper local. Chọn tệp ggml đa ngôn ngữ trong Cấu hình AI → Phiên âm (ví dụ ggml-large-v3-turbo-q5_0.bin).",
   );
 }
 export function runTranscriptionProcess(

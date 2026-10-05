@@ -1501,28 +1501,27 @@ code {
 }
 .auto-reply-switch {
   display: flex;
-  gap: 3px;
-  width: 100%;
-  max-width: 336px;
-  padding: 3px;
+  gap: 2px;
+  width: fit-content;
+  max-width: 100%;
+  padding: 2px;
   border: 1px solid #dce3ef;
   border-radius: 9px;
   background: #f3f5fa;
 }
 .auto-reply-switch button {
-  flex: 1;
+  flex: none;
   min-width: 0;
-  min-height: 36px;
-  padding: 6px 9px;
+  min-height: 28px;
+  padding: 4px 10px;
   border: 0;
   border-radius: 6px;
   background: transparent;
   color: #6a7891;
+  font-size: 12px;
+  line-height: 16px;
   font-weight: 400;
   white-space: nowrap;
-}
-.auto-reply-switch button:first-child {
-  flex: 2;
 }
 .auto-reply-switch button:hover:not(:disabled) {
   background: #e8edf6;

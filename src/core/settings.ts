@@ -22,14 +22,18 @@ export function updateAccount(
     delete existing.recoveryPin;
     existing.autoRestorePin = false;
     existing.pinAutoFillBlocked = false;
+    existing.pinRestorePending = false;
   } else {
     if (input.recoveryPin) {
       existing.recoveryPin = input.recoveryPin;
       existing.pinAutoFillBlocked = false;
+      existing.pinRestorePending = false;
     }
     if (input.autoRestorePin !== undefined) {
-      if (input.autoRestorePin && !existing.autoRestorePin)
+      if (input.autoRestorePin && !existing.autoRestorePin) {
         existing.pinAutoFillBlocked = false;
+        existing.pinRestorePending = false;
+      }
       existing.autoRestorePin =
         input.autoRestorePin && Boolean(existing.recoveryPin);
     }

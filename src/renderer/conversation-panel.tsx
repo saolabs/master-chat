@@ -33,6 +33,7 @@ export function ConversationPanel({
   onComposerChange: (value: ComposerState) => void;
 }) {
   const [goal, setGoal] = useState("");
+  const replying = Boolean(snapshot.replying?.includes(c.id));
   const [sendAfterGenerate, setSendAfterGenerate] = useState(false);
   const [historySearch, setHistorySearch] = useState("");
   const [historyLimit, setHistoryLimit] = useState(50);
@@ -109,7 +110,7 @@ export function ConversationPanel({
     composerInput.current?.focus();
   }
   async function generateDraft() {
-    if (busy || submitting.current || blockedSend) return;
+    if (busy || replying || submitting.current || blockedSend) return;
     submitting.current = true;
     onComposerChange({ ...composer, generating: true });
     try {
@@ -329,6 +330,22 @@ export function ConversationPanel({
                             : "Tin nhắn âm thanh"}
                       </strong>
                       <p>{a.analysis || a.error || "Chưa đọc nội dung tệp"}</p>
+                      {a.analysis && a.error && <small>{a.error}</small>}
+                      {a.kind === "audio" && (
+                        <button
+                          className="history-more"
+                          disabled={busy || replying}
+                          onClick={() =>
+                            void run({
+                              type: "media.retry",
+                              conversationId: c.id,
+                              target: { messageId: m.id, attachmentId: a.id },
+                            })
+                          }
+                        >
+                          {a.analysis ? "Chép lại" : "Chép âm thanh"}
+                        </button>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -446,17 +463,22 @@ export function ConversationPanel({
                   type="button"
                   disabled={
                     busy ||
+                    replying ||
                     blockedSend ||
                     Boolean(composer.text.trim() && !composer.draftId)
                   }
                   onClick={() => void generateDraft()}
                 >
-                  {composer.generating ? (
+                  {composer.generating || replying ? (
                     <LoaderCircle size={16} className="composer-spinner" />
                   ) : (
                     <Sparkles size={16} />
                   )}
-                  {composer.generating ? "Đang tạo nháp…" : "Tạo nháp AI"}
+                  {composer.generating
+                    ? "Đang tạo nháp…"
+                    : replying
+                      ? "Đang trả lời…"
+                      : "Tạo nháp AI"}
                 </button>
                 <div className="composer-toolbar-end">
                   {composer.text.length >= 4500 && (

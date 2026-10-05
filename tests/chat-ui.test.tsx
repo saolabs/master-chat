@@ -62,11 +62,13 @@ async function mount(t: TestContext, review?: ReplyReview) {
   const calls: Command[] = [];
   let composition: ComposerState = { text: "" };
   let failSend = false;
+  let replying: string[] = [];
   let render!: () => void;
   const snapshot = (): Snapshot => ({
     data: publicState(structuredClone(state)),
     tabs: [],
     paused: true,
+    replying,
     notice: "",
   });
   const run = async (command: Command) => {
@@ -166,6 +168,10 @@ async function mount(t: TestContext, review?: ReplyReview) {
       failSend = true;
     },
     composition: () => composition,
+    replying: (ids: string[]) => {
+      replying = ids;
+      return act(async () => render());
+    },
   };
 }
 
@@ -207,6 +213,20 @@ test("manual composer sends while automation is paused and preserves content on 
     basedOnId: null,
   });
   assert.equal(r.input().textContent, "My reply");
+});
+test("an active reply disables drafting only in its own conversation", async (t) => {
+  const r = await mount(t);
+  await r.replying(["other-conversation"]);
+  const button = () =>
+    r.dom.window.document.querySelector<HTMLButtonElement>(".composer-ai")!;
+  assert.equal(button().disabled, false);
+  await r.replying(["c"]);
+  assert.equal(button().disabled, true);
+  assert.equal(button().textContent, "Đang trả lời…");
+  await r.click("Đang trả lời…");
+  assert.equal(r.calls.length, 0);
+  await r.replying([]);
+  assert.equal(button().disabled, false);
 });
 
 test("AI draft fills the editor, explicit send approves the edited text as manual, and clears it", async (t) => {
@@ -583,4 +603,24 @@ test("uncertain disables editing without losing the current text", async (t) => 
   assert.equal(r.input().getAttribute("contenteditable"), "false");
   assert.equal(r.input().getAttribute("aria-disabled"), "true");
   assert.equal(r.input().textContent, "Chưa gửi");
+});
+
+test("cached voice has a retry control targeting only that attachment", async (t) => {
+  const r = await mount(t);
+  r.state.conversations[0].messages.push({
+    id: "voice-message",
+    text: "[Tin nhắn thoại]",
+    direction: "incoming",
+    timestamp: null,
+    observedAt: 1,
+    baseline: true,
+    attachments: [{ id: "voice", kind: "audio", analysis: "Bản chép sai" }],
+  });
+  await r.refresh();
+  await r.click("Chép lại");
+  assert.deepEqual(r.calls.at(-1), {
+    type: "media.retry",
+    conversationId: "c",
+    target: { messageId: "voice-message", attachmentId: "voice" },
+  });
 });

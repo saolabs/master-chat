@@ -328,7 +328,7 @@ export function ResponseSettings({
                   Tệp model Whisper đa ngôn ngữ
                   <input
                     value={transcription.modelPath ?? ""}
-                    placeholder="Ví dụ: /đường/dẫn/ggml-base.bin"
+                    placeholder="Ví dụ: /đường/dẫn/ggml-large-v3-turbo-q5_0.bin"
                     onChange={(e) =>
                       setValue({
                         ...value,
@@ -386,7 +386,7 @@ export function ResponseSettings({
             <input
               maxLength={4}
               value={transcription.language ?? ""}
-              placeholder="auto · tự nhận diện (hoặc vi, en)"
+              placeholder="vi · tiếng Việt (hoặc auto, en)"
               onChange={(e) =>
                 setValue({
                   ...value,

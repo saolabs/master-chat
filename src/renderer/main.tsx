@@ -48,6 +48,9 @@ const MENU = [
   ["profile", "Bộ đọc trình duyệt", "⌘"],
 ] as const;
 function App() {
+  const [conversationCommands, setConversationCommands] = useState<
+    Record<string, number>
+  >({});
   const [composers, setComposers] = useState<Record<string, ComposerState>>({});
   const composerCache = useRef<Record<string, ComposerState>>({});
   function updateComposer(id: string, value: ComposerState) {
@@ -148,7 +151,19 @@ function App() {
     };
   }, [page, snapshot?.tabs.length]);
   async function run(command: Command) {
-    setBusy(true);
+    const conversationId =
+      "conversationId" in command && command.conversationId
+        ? command.conversationId
+        : "draftId" in command
+          ? snapshot?.data.drafts.find((d) => d.id === command.draftId)
+              ?.conversationId
+          : undefined;
+    if (conversationId)
+      setConversationCommands((jobs) => ({
+        ...jobs,
+        [conversationId]: (jobs[conversationId] ?? 0) + 1,
+      }));
+    else setBusy(true);
     setError("");
     try {
       const s = await window.masterChat.command(command);
@@ -158,7 +173,14 @@ function App() {
       setError(e instanceof Error ? e.message : String(e));
       return null;
     } finally {
-      setBusy(false);
+      if (conversationId)
+        setConversationCommands((jobs) => {
+          const next = { ...jobs };
+          if (next[conversationId] > 1) next[conversationId]--;
+          else delete next[conversationId];
+          return next;
+        });
+      else setBusy(false);
     }
   }
   if (!snapshot)
@@ -423,7 +445,9 @@ function App() {
                     key={conversation.id}
                     c={conversation}
                     snapshot={snapshot}
-                    busy={busy}
+                    busy={
+                      busy || Boolean(conversationCommands[conversation.id])
+                    }
                     run={run}
                     composer={composers[conversation.id] || { text: "" }}
                     onComposerChange={(value) =>

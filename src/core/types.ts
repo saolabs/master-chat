@@ -9,6 +9,7 @@ export type Account = {
   recoveryPin?: string;
   autoRestorePin?: boolean;
   pinAutoFillBlocked?: boolean;
+  pinRestorePending?: boolean;
   cookies: unknown[];
   facebookUserId?: string;
   inboxInitialized?: boolean;
@@ -370,8 +371,13 @@ export type Command =
       conversationDirection?: string;
     }
   | {
-      type: "style.learn" | "media.retry" | "conversation.backfill";
+      type: "style.learn" | "conversation.backfill";
       conversationId: string;
+    }
+  | {
+      type: "media.retry";
+      conversationId: string;
+      target?: { messageId: string; attachmentId: string };
     }
   | { type: "profile.save"; profile: DOMProfile }
   | { type: "profile.reset" }

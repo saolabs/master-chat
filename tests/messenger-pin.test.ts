@@ -20,8 +20,11 @@ function page(html: string, url = "https://www.facebook.com/messages/t/123/") {
   } as any;
   return {
     dom,
-    invoke: (action: "probe" | "fill" = "probe", pin = "012345") =>
-      dom.window.eval(messengerPinScript(action, pin)),
+    invoke: (
+      action: "probe" | "fill" | "confirm" | "focus" = "probe",
+      pin = "012345",
+      index = 0,
+    ) => dom.window.eval(messengerPinScript(action, pin, index)),
   };
 }
 const heading = "<h2>Nhập mã PIN để khôi phục đoạn chat của bạn</h2>";
@@ -101,6 +104,60 @@ test("English restoration title and in-dialog confirmation work without exposing
   assert.equal(clicks, 1);
   p.dom.window.close();
 });
+test("PIN restore recognizes short, decomposed and full-page restoration headings", () => {
+  for (const html of [
+    '<div role="dialog"><h2>Nhập mã PIN</h2><p>Đồng bộ lịch sử đoạn chat</p><input type="password"></div>',
+    '<div role="dialog"><h2>Enter your PIN</h2><p>Sync your chat history</p><input inputmode="numeric"></div>',
+    '<main><section><h1>Nhập mã PIN để truy cập đoạn chat</h1><input type="password"><button>Tiếp tục</button></section></main>',
+    '<div role="dialog"><h2>Nhập mã PIN</h2><input type="password"></div>'.normalize(
+      "NFD",
+    ),
+    '<div role="dialog"><div role="dialog"><h2>Nhập mã PIN</h2><input type="tel" maxlength="6"></div></div>',
+    '<div role="dialog"><h2 id="pin-title">Nhập mã PIN</h2><input aria-labelledby="pin-title"></div>',
+  ]) {
+    const p = page(html);
+    assert.equal(p.invoke(), "ready");
+    assert.equal(p.invoke("fill"), "submitted");
+    p.dom.window.close();
+  }
+  const chat = page(
+    '<h2>Nhập mã PIN</h2><input type="password"><div contenteditable="true" role="textbox"></div>',
+  );
+  assert.equal(chat.invoke("fill"), "absent");
+  chat.dom.window.close();
+});
+test("PIN confirmation waits for React readiness and never submits edited input", () => {
+  const p = page(
+    fixture().replace("</div>", "<button disabled>Tiếp tục</button></div>"),
+  );
+  let clicks = 0;
+  const button = p.dom.window.document.querySelector("button")!;
+  button.onclick = () => {
+    clicks++;
+  };
+  assert.equal(p.invoke("fill"), "filled");
+  assert.equal(clicks, 0);
+  assert.equal(p.invoke("confirm"), "filled");
+  button.disabled = false;
+  p.dom.window.document.querySelector("input")!.value = "654321";
+  assert.equal(p.invoke("confirm"), "manual");
+  assert.equal(clicks, 0);
+  p.dom.window.document.querySelector("input")!.value = "012345";
+  assert.equal(p.invoke("confirm"), "submitted");
+  assert.equal(clicks, 1);
+  p.dom.window.close();
+});
+test("PIN recovery overlay without dialog role is recognized above a visible composer", () => {
+  const p = page(
+    '<main><div contenteditable="true" role="textbox"></div></main>' +
+      '<div role="dialog"><h2>Thông tin cuộc trò chuyện</h2></div>' +
+      `<section>${heading}<p>Một số tin nhắn còn thiếu.</p><input aria-label="Mã PIN" maxlength="6"></section>`,
+  );
+  assert.equal(p.invoke(), "ready");
+  assert.equal(p.invoke("fill"), "submitted");
+  assert.equal(p.dom.window.document.querySelector("input")!.value, "012345");
+  p.dom.window.close();
+});
 test("PIN settings preserve omitted secrets, allow explicit replacement/deletion, and public state excludes the PIN", () => {
   const a: Account = {
     id: "a",
@@ -137,4 +194,30 @@ test("PIN settings preserve omitted secrets, allow explicit replacement/deletion
   updateAccount(a, { ...base, clearRecoveryPin: true, autoRestorePin: true });
   assert.equal(a.recoveryPin, undefined);
   assert.equal(a.autoRestorePin, false);
+});
+test("native PIN focus validates labelled fields and each previously entered split digit", () => {
+  const single = page(
+    fixture('<label for="pin">Mã PIN</label><input id="pin" maxlength="6">'),
+  );
+  assert.equal(single.invoke("focus"), "single");
+  assert.equal(single.dom.window.document.activeElement?.id, "pin");
+  single.dom.window.document.querySelector("input")!.value = "1";
+  assert.equal(single.invoke("focus"), "manual");
+  single.dom.window.close();
+  const split = page(
+    fixture(
+      Array.from(
+        { length: 6 },
+        () => '<input type="password" maxlength="1">',
+      ).join(""),
+    ),
+  );
+  const inputs = split.dom.window.document.querySelectorAll("input");
+  assert.equal(split.invoke("focus"), "split");
+  inputs[0].value = "0";
+  assert.equal(split.invoke("focus", "012345", 1), "split");
+  assert.equal(split.dom.window.document.activeElement, inputs[1]);
+  inputs[0].value = "9";
+  assert.equal(split.invoke("focus", "012345", 1), "manual");
+  split.dom.window.close();
 });

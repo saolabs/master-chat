@@ -595,3 +595,78 @@ test("voice message identity stays stable when a lazy audio source appears, incl
     d.window.close();
   }
 });
+test("voice player beside its semantic label is read and loaded without borrowing adjacent message media", () => {
+  const { d, run } = fixture(
+    `<section><div><div role="button" aria-label="Tin nhắn do Tôi là DEV gửi lúc 10:18: Văn bản trước"></div></div>` +
+      `<div id="voice-row"><div><button>Phát</button><div role="slider" aria-label="Thanh kéo âm thanh"></div><span>0:03</span></div><div role="button" aria-label="Nhập, Tin nhắn do Tôi là DEV gửi lúc 10:19"></div></div>` +
+      `<div><div role="button" aria-label="Tin nhắn do Tôi là DEV gửi lúc 10:20: Văn bản sau"></div></div></section>`,
+  );
+  try {
+    const first = run("read").messages;
+    assert.equal(first.length, 3);
+    assert.equal(first[0].attachments, undefined);
+    assert.equal(first[2].attachments, undefined);
+    const voice = first[1];
+    assert.equal(voice.text, "[Tin nhắn thoại]");
+    assert.equal(voice.attachments[0].kind, "audio");
+    let plays = 0;
+    const row = d.window.document.querySelector("#voice-row")!;
+    row.querySelector("button")!.onclick = () => {
+      plays++;
+      row.insertAdjacentHTML(
+        "beforeend",
+        '<audio src="blob:https://www.facebook.com/voice-sibling"></audio>',
+      );
+    };
+    run("media-source", {
+      threadId: "123",
+      recipient: "Tôi là DEV",
+      messageId: voice.id,
+      attachmentId: voice.attachments[0].id,
+      load: true,
+    });
+    assert.equal(plays, 1);
+    const loaded = run("read").messages;
+    assert.equal(loaded[1].id, voice.id);
+    assert.equal(loaded[1].attachments[0].id, voice.attachments[0].id);
+    assert.equal(
+      loaded[1].attachments[0].source,
+      "blob:https://www.facebook.com/voice-sibling",
+    );
+    assert.equal(loaded[0].attachments, undefined);
+    assert.equal(loaded[2].attachments, undefined);
+  } finally {
+    d.window.close();
+  }
+});
+test("voice source from a detached Audio player is bound to the requested attachment", () => {
+  const { d, run } = fixture(
+    '<div role="article"><div role="button" aria-label="Tin nhắn do Tôi là DEV gửi lúc 10:19: Tin nhắn thoại"></div><button aria-label="Phát"></button></div>',
+  );
+  try {
+    const original = d.window.HTMLMediaElement.prototype.play;
+    d.window.HTMLMediaElement.prototype.play = async function () {};
+    d.window.HTMLMediaElement.prototype.pause = function () {};
+    const voice = run("read").messages[0];
+    const options = {
+      threadId: "123",
+      recipient: "Tôi là DEV",
+      messageId: voice.id,
+      attachmentId: voice.attachments[0].id,
+    };
+    d.window.document.querySelector<HTMLButtonElement>(
+      '[aria-label="Phát"]',
+    )!.onclick = () => {
+      const audio = new d.window.Audio(
+        "blob:https://www.facebook.com/detached-voice",
+      );
+      void audio.play();
+    };
+    const media = run("media-source", { ...options, load: true });
+    assert.equal(media.source, "blob:https://www.facebook.com/detached-voice");
+    assert.equal(run("media-source", options).source, media.source);
+    d.window.HTMLMediaElement.prototype.play = original;
+  } finally {
+    d.window.close();
+  }
+});

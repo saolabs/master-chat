@@ -30,6 +30,7 @@ import {
 import type { Vault } from "./vault.ts";
 import { waitForMessengerRead } from "../src/core/messenger-readiness.ts";
 import { SendNotAttemptedError } from "../src/core/send-status.ts";
+import { TaskPool } from "../src/core/task-pool.ts";
 import {
   allowedMediaSource,
   boundedMedia,
@@ -41,6 +42,7 @@ type Entry = {
   view: WebContentsView;
   window?: BrowserWindow;
   worker?: boolean;
+  blocking?: boolean;
 };
 export class Browsers {
   private entries = new Map<string, Entry>();
@@ -48,9 +50,13 @@ export class Browsers {
   private monitors = new Map<string, WebContentsView>();
   private inboxOffsets = new Map<string, number>();
   private workers = new Map<string, WebContentsView>();
+  private workerPool = new TaskPool<WebContentsView>(3);
+  private stopped = false;
   private liveViews = new Map<string, WebContentsView>();
   private accountQueues = new Map<string, Promise<unknown>>();
   private pageRefreshes = new WeakMap<WebContents, number>();
+  private pageAccounts = new WeakMap<WebContents, string>();
+  private pageStatuses = new WeakMap<WebContents, string>();
   private selected: string | null = null;
   private bounds: Electron.Rectangle | null = null;
   private loginAttempts = new Map<string, { wcId: number; at: number }>();
@@ -130,6 +136,7 @@ export class Browsers {
     return existing;
   }
   private protect(wc: WebContents, a: Account, update?: () => void) {
+    this.pageAccounts.set(wc, a.id);
     wc.setWindowOpenHandler(() => ({ action: "deny" }));
     const navigationGuard = (e: Electron.Event, url: string) => {
       try {
@@ -169,9 +176,12 @@ export class Browsers {
     });
   }
   private loginStatus(wc: WebContents, status: string) {
+    this.pageStatuses.set(wc, status);
     const entry = [...this.entries.values()].find(
       (e) => e.view.webContents.id === wc.id,
     );
+    if (entry?.worker && entry.blocking === false && status === "Đã đăng nhập")
+      return;
     if (entry && entry.meta.status !== status) {
       entry.meta.status = status;
       this.changed();
@@ -180,11 +190,69 @@ export class Browsers {
   private restorePin(wc: WebContents, original: Account) {
     const existing = this.pinRestores.get(wc.id);
     if (existing) return existing;
-    const task = this.restorePinOnce(wc, original).finally(() =>
-      this.pinRestores.delete(wc.id),
-    );
+    const task = this.serialized(`pin:${original.id}`, () =>
+      this.restorePinOnce(wc, original),
+    ).finally(() => this.pinRestores.delete(wc.id));
     this.pinRestores.set(wc.id, task);
     return task;
+  }
+  private pageExecution<T>(wc: WebContents, operation: () => Promise<T>) {
+    return new Promise<T>((resolve, reject) => {
+      if (wc.isDestroyed()) {
+        reject(new Error("Trang Messenger đã đóng."));
+        return;
+      }
+      const stop = () => finish(new Error("Trang Messenger không phản hồi."));
+      const timer = setTimeout(stop, 5000);
+      const finish = (error?: unknown, result?: T) => {
+        clearTimeout(timer);
+        wc.removeListener("destroyed", stop);
+        if (error) reject(error);
+        else resolve(result as T);
+      };
+      wc.once("destroyed", stop);
+      try {
+        operation().then((result) => finish(undefined, result), finish);
+      } catch (error) {
+        finish(error);
+      }
+    });
+  }
+  private pinScript(wc: WebContents, script: string) {
+    return this.pageExecution(wc, () => wc.executeJavaScript(script));
+  }
+  private async pinRestored(wc: WebContents, a: Account): Promise<boolean> {
+    if (wc.isDestroyed()) return false;
+    const read = (await this.pageExecution(wc, () =>
+      this.native(wc, "read"),
+    )) as MessengerRead;
+    const inboxReady =
+      /^\/messages\/?$/.test(new URL(wc.getURL()).pathname) &&
+      (await this.pinScript(
+        wc,
+        `Boolean(document.querySelector('[role="grid"] a[href*="/messages/"]'))`,
+      ));
+    return !read.blocked && Boolean(read.composerPresent || inboxReady);
+  }
+  private async confirmPinRestored(wc: WebContents, a: Account) {
+    await this.assertSession(wc, a);
+    await this.vault.mutate((state) => {
+      const current = state.accounts.find((x) => x.id === a.id);
+      if (
+        current &&
+        current.recoveryPin === a.recoveryPin &&
+        current.pinRestorePending
+      ) {
+        current.pinAutoFillBlocked = false;
+        current.pinRestorePending = false;
+      }
+    });
+    this.loginStatus(wc, "Đã khôi phục lịch sử bằng PIN local");
+    const verification = [...this.entries.values()].find(
+      (entry) => entry.worker && entry.view.webContents === wc,
+    );
+    if (verification) this.close(verification.meta.id);
+    this.changed();
   }
   private async restorePinOnce(
     wc: WebContents,
@@ -194,11 +262,28 @@ export class Browsers {
     let reserved = false;
     try {
       facebookUrl(wc.getURL());
-      const probe = (await wc.executeJavaScript(
+      const probe = (await this.pinScript(
+        wc,
         messengerPinScript("probe"),
       )) as PinProbe;
-      if (probe === "absent") return "absent";
       const a = this.account(original.id);
+      if (probe === "absent") {
+        // A slow accepted restore may finish after the first wait. Confirm it
+        // on later readiness checks instead of permanently blocking a valid PIN.
+        if (a.pinRestorePending && (await this.pinRestored(wc, a))) {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          if (await this.pinRestored(wc, a))
+            await this.confirmPinRestored(wc, a);
+        }
+        return "absent";
+      }
+      if (probe === "rejected" && a.pinRestorePending) {
+        await this.vault.mutate((state) => {
+          const current = state.accounts.find((x) => x.id === a.id);
+          if (current && current.recoveryPin === a.recoveryPin)
+            current.pinRestorePending = false;
+        });
+      }
       if (
         probe !== "ready" ||
         !a.recoveryPin ||
@@ -226,54 +311,95 @@ export class Browsers {
           return false;
         // Persist BEFORE filling: a wrong PIN or an interrupted process cannot cause repeated automatic attempts.
         current.pinAutoFillBlocked = true;
+        current.pinRestorePending = true;
         return true;
       });
       if (!reserved) return "blocked";
       this.changed();
       this.loginStatus(wc, "Đang khôi phục lịch sử bằng PIN đã lưu trên máy…");
-      const result = await wc.executeJavaScript(
-        messengerPinScript("fill", a.recoveryPin),
-      );
-      if (result !== "submitted") return "blocked";
+      // Chromium input reaches Messenger's real editing handlers; setting the
+      // DOM value and dispatching synthetic events can leave recovery unstarted.
+      let result = (await this.pinScript(
+        wc,
+        messengerPinScript("focus", a.recoveryPin),
+      )) as PinProbe;
+      let inputAttempted = false;
+      if (result === "single" || result === "split") {
+        const split = result === "split";
+        if (!wc.debugger.isAttached()) wc.debugger.attach("1.3");
+        for (let index = 0; index < (split ? 6 : 1); index++) {
+          if (index) {
+            const focused = await this.pinScript(
+              wc,
+              messengerPinScript("focus", a.recoveryPin, index),
+            );
+            if (focused !== "split") throw new Error("PIN input changed.");
+          }
+          inputAttempted = true;
+          await wc.debugger.sendCommand("Input.insertText", {
+            text: split ? a.recoveryPin[index] : a.recoveryPin,
+          });
+        }
+        result = (await this.pinScript(
+          wc,
+          messengerPinScript("confirm", a.recoveryPin),
+        )) as PinProbe;
+        if (result === "absent") result = "submitted";
+      }
+      if (result !== "submitted" && result !== "filled") {
+        // A form that changed before any input was supplied is safe to re-probe.
+        if (!inputAttempted && ["absent", "manual"].includes(result))
+          await this.vault.mutate((state) => {
+            const current = state.accounts.find((x) => x.id === a.id);
+            if (current && current.recoveryPin === a.recoveryPin) {
+              current.pinAutoFillBlocked = false;
+              current.pinRestorePending = false;
+            }
+          });
+        return "blocked";
+      }
+      let needsConfirmation = result === "filled";
       let readyChecks = 0;
-      for (let n = 0; n < 24; n++) {
+      for (let n = 0; n < 120; n++) {
         await new Promise((resolve) => setTimeout(resolve, 250));
         if (wc.isDestroyed()) return "blocked";
-        const next = (await wc.executeJavaScript(
+        const next = (await this.pinScript(
+          wc,
           messengerPinScript("probe"),
         )) as PinProbe;
-        if (next === "rejected") break;
+        if (next === "rejected") {
+          await this.vault.mutate((state) => {
+            const current = state.accounts.find((x) => x.id === a.id);
+            if (current && current.recoveryPin === a.recoveryPin)
+              current.pinRestorePending = false;
+          });
+          break;
+        }
+        if (needsConfirmation && next === "manual") {
+          const confirmation = await this.pinScript(
+            wc,
+            messengerPinScript("confirm", a.recoveryPin),
+          );
+          if (confirmation === "submitted") needsConfirmation = false;
+        }
         if (next !== "absent") {
           readyChecks = 0;
           continue;
         }
-        const read = (await this.native(wc, "read")) as MessengerRead;
-        const inboxReady =
-          /^\/messages\/?$/.test(new URL(wc.getURL()).pathname) &&
-          (await wc.executeJavaScript(
-            `Boolean(document.querySelector('[role="grid"] a[href*="/messages/"]'))`,
-          ));
-        if (read.blocked || (!read.composerPresent && !inboxReady)) {
+        if (!(await this.pinRestored(wc, a))) {
           readyChecks = 0;
           continue;
         }
         if (++readyChecks < 2) continue;
-        await this.assertSession(wc, a);
-        await this.vault.mutate((state) => {
-          const current = state.accounts.find((x) => x.id === a.id);
-          if (current && current.recoveryPin === a.recoveryPin)
-            current.pinAutoFillBlocked = false;
-        });
-        this.loginStatus(wc, "Đã khôi phục lịch sử bằng PIN local");
-        const verification = [...this.entries.values()].find(
-          (entry) => entry.worker && entry.view.webContents === wc,
-        );
-        if (verification) this.close(verification.meta.id);
-        this.changed();
+        await this.confirmPinRestored(wc, a);
         return "restored";
       }
     } catch {
       // Intentionally omit exception details and PIN values from notices, logs and snapshots.
+      this.loginStatus(
+        wc,
+        "Không kiểm tra được biểu mẫu khôi phục PIN; tải lại Messenger để thử lại.",
+      );
     } finally {
       if (reserved && this.account(original.id).pinAutoFillBlocked)
         this.loginStatus(
@@ -290,7 +416,8 @@ export class Browsers {
       const url = facebookUrl(wc.getURL());
       const a = this.account(original.id); // Credentials may have been edited after the tab was opened.
       if ((await this.restorePin(wc, a)) !== "absent") return;
-      const probe = (await wc.executeJavaScript(
+      const probe = (await this.pinScript(
+        wc,
         loginScript("probe"),
       )) as LoginProbe;
       if (probe === "verification") {
@@ -320,6 +447,23 @@ export class Browsers {
         this.loginAttempts.delete(a.id);
         this.challenges.delete(wc.id);
         this.loginStatus(wc, "Đã đăng nhập");
+        // Another page in this account may have restored the shared encrypted
+        // history while this verification window was waiting for its PIN form.
+        const verification = [...this.entries.values()].find(
+          (entry) =>
+            entry.worker &&
+            entry.blocking !== false &&
+            entry.view.webContents === wc,
+        );
+        if (
+          verification &&
+          !wc.isLoading() &&
+          (await this.pinRestored(wc, a))
+        ) {
+          await this.assertSession(wc, a);
+          this.close(verification.meta.id);
+          return;
+        }
         if (
           (url.pathname === "/" || /login/.test(url.pathname)) &&
           !wc.isLoading()
@@ -355,7 +499,8 @@ export class Browsers {
       }
       // Reserve per account before awaiting, so a visible tab and worker cannot submit concurrently.
       this.loginAttempts.set(a.id, { wcId: wc.id, at: Date.now() });
-      const result = await wc.executeJavaScript(
+      const result = await this.pinScript(
+        wc,
         loginScript("submit", a.username, a.password),
       );
       if (result !== "submitted") {
@@ -499,6 +644,12 @@ export class Browsers {
         else e.view.webContents.close();
       }
       this.entries.delete(id);
+      for (const [key, view] of this.workers) {
+        if (view === e.view && !this.workerPool.has(key)) {
+          if (!view.webContents.isDestroyed()) view.webContents.close();
+          this.workers.delete(key);
+        }
+      }
       this.changed();
     });
     this.changed();
@@ -546,10 +697,13 @@ export class Browsers {
       this.pageRefreshes = new WeakMap();
       return;
     }
-    for (const views of [this.monitors, this.workers, this.liveViews]) {
-      const view = views.get(accountId);
-      if (view) this.pageRefreshes.delete(view.webContents);
-    }
+    for (const view of [
+      ...this.monitors.values(),
+      ...this.workers.values(),
+      ...this.liveViews.values(),
+    ])
+      if (this.pageAccounts.get(view.webContents) === accountId)
+        this.pageRefreshes.delete(view.webContents);
   }
   private async preparePage(wc: WebContents, url: string, samePage: boolean) {
     const now = Date.now();
@@ -588,7 +742,7 @@ export class Browsers {
       });
   }
   async scanInbox(accountId: string): Promise<InboxScan> {
-    return this.serialized(accountId, async () => {
+    return this.serialized(`inbox:${accountId}`, async () => {
       const a = this.account(accountId);
       let view = this.monitors.get(accountId);
       if (!view) {
@@ -616,6 +770,12 @@ export class Browsers {
         { threads: InboxThread[]; revision: number; more: boolean } | undefined;
       for (let n = 0; n < 12; n++) {
         try {
+          if ((await this.restorePin(wc, a)) === "blocked") {
+            this.showWorker(a.id, view);
+            throw new Error(
+              "Inbox đang yêu cầu PIN khôi phục. Kiểm tra cửa sổ Messenger.",
+            );
+          }
           first = await this.native(wc, "inbox");
           break;
         } catch {
@@ -662,10 +822,10 @@ export class Browsers {
       };
     });
   }
-  private async worker(a: Account) {
-    let worker = this.workers.get(a.id);
+  private async worker(a: Account, conversationId: string) {
+    let worker = this.workers.get(conversationId);
     if (worker?.webContents.isDestroyed()) {
-      this.workers.delete(a.id);
+      this.workers.delete(conversationId);
       worker = undefined;
     }
     if (!worker) {
@@ -680,9 +840,35 @@ export class Browsers {
       });
       worker.setBounds({ x: 0, y: 0, width: 1100, height: 800 });
       this.protect(worker.webContents, a);
-      this.workers.set(a.id, worker);
+      if (this.stopped) {
+        worker.webContents.close();
+        throw new Error("Ứng dụng đã dừng xử lý.");
+      }
+      this.workers.set(conversationId, worker);
     }
     return worker.webContents;
+  }
+  // Browser operations are serialized only within the same conversation.
+  // Separate conversations get separate pages sharing the account session.
+  async withConversationTask<T>(
+    c: Conversation,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return this.workerPool.use(
+      c.id,
+      c.accountId,
+      async () => {
+        await this.worker(this.account(c.accountId), c.id);
+        return this.workers.get(c.id)!;
+      },
+      (view) => {
+        // Keep an unresolved verification/send result available for inspection.
+        if ([...this.entries.values()].some((e) => e.view === view)) return;
+        if (this.workers.get(c.id) === view) this.workers.delete(c.id);
+        if (!view.webContents.isDestroyed()) view.webContents.close();
+      },
+      operation,
+    );
   }
   private serialized<T>(
     accountId: string,
@@ -691,17 +877,25 @@ export class Browsers {
     const task = (this.accountQueues.get(accountId) || Promise.resolve()).then(
       operation,
     );
-    this.accountQueues.set(
-      accountId,
-      task.catch(() => undefined),
-    );
+    const settled = task
+      .then(
+        () => undefined,
+        () => undefined,
+      )
+      .finally(() => {
+        if (this.accountQueues.get(accountId) === settled)
+          this.accountQueues.delete(accountId);
+      });
+    this.accountQueues.set(accountId, settled);
     return task;
   }
   async readConversation(
     c: Conversation,
     profile?: DOMProfile,
   ): Promise<Omit<Message, "baseline">[]> {
-    return this.serialized(c.accountId, () => this.readUnlocked(c, profile));
+    return this.serialized(`thread:${c.id}`, () =>
+      this.withConversationTask(c, () => this.readUnlocked(c, profile)),
+    );
   }
   async readHistory(
     c: Conversation,
@@ -712,11 +906,13 @@ export class Browsers {
       throw new Error(
         "Nạp sâu cần bộ đọc Messenger tích hợp. Với bộ đọc riêng, mở và cuộn lịch sử rồi bấm Nạp lịch sử.",
       );
-    return this.serialized(c.accountId, () =>
-      this.readUnlocked(c, undefined, {
-        limit: Math.min(5000, c.messages.length + 500),
-        signal,
-      }),
+    return this.serialized(`thread:${c.id}`, () =>
+      this.withConversationTask(c, () =>
+        this.readUnlocked(c, undefined, {
+          limit: Math.min(5000, c.messages.length + 500),
+          signal,
+        }),
+      ),
     );
   }
   async readLiveConversation(
@@ -726,7 +922,10 @@ export class Browsers {
     const a = this.account(c.accountId);
     if (
       [...this.entries.values()].some(
-        (entry) => entry.worker && entry.meta.accountId === a.id,
+        (entry) =>
+          entry.worker &&
+          entry.blocking !== false &&
+          entry.meta.accountId === a.id,
       )
     )
       throw new Error(
@@ -785,10 +984,10 @@ export class Browsers {
     history?: { limit: number; signal?: AbortSignal },
   ): Promise<Omit<Message, "baseline">[]> {
     const a = this.account(c.accountId),
-      wc = await this.worker(a);
+      wc = await this.worker(a, c.id);
     if (
       [...this.entries.values()].some(
-        (e) => e.worker && e.meta.accountId === a.id,
+        (e) => e.worker && e.blocking !== false && e.meta.accountId === a.id,
       )
     )
       throw new Error(
@@ -829,79 +1028,96 @@ export class Browsers {
     attachmentId: string,
     signal?: AbortSignal,
   ): Promise<MediaPayload> {
-    return this.serialized(c.accountId, async () => {
-      signal?.throwIfAborted();
-      const a = this.account(c.accountId),
-        wc = await this.worker(a);
-      await this.assertSession(wc, a);
-      let currentThread: string | null = null;
-      try {
-        currentThread = threadIdentity(wc.getURL());
-      } catch {}
-      if (currentThread !== c.platformId) await wc.loadURL(c.url);
-      let read = await waitForMessengerRead(
-        async () => this.native(wc, "read"),
-        c,
-        "Đọc media",
-      );
-      for (
-        let n = 0;
-        !read.messages.some((m) => m.id === messageId) && n < 10;
-        n++
-      ) {
+    return this.serialized(`thread:${c.id}`, () =>
+      this.withConversationTask(c, async () => {
         signal?.throwIfAborted();
-        await this.native(wc, "scroll-history");
-        await new Promise((r) => setTimeout(r, 250));
-        read = await waitForMessengerRead(
+        const a = this.account(c.accountId),
+          wc = await this.worker(a, c.id);
+        await this.assertSession(wc, a);
+        let currentThread: string | null = null;
+        try {
+          currentThread = threadIdentity(wc.getURL());
+        } catch {}
+        if (currentThread !== c.platformId) await wc.loadURL(c.url);
+        let read = await waitForMessengerRead(
           async () => this.native(wc, "read"),
           c,
-          "Tìm tin chứa media",
+          "Đọc media",
         );
-      }
-      const options = {
-        threadId: c.platformId,
-        recipient: c.name,
-        messageId,
-        attachmentId,
-      };
-      wc.setAudioMuted(true);
-      let media = await this.native(wc, "media-source", {
-        ...options,
-        load: true,
-      });
-      for (let n = 0; !media.source && n < 12; n++) {
-        signal?.throwIfAborted();
-        await new Promise((r) => setTimeout(r, 250));
-        media = await this.native(wc, "media-source", options);
-      }
-      if (!media.source || !allowedMediaSource(media.source))
-        throw new Error(
-          "Messenger chưa cung cấp nguồn ảnh/âm thanh được hỗ trợ. Mở tệp trong Messenger rồi thử lại.",
-        );
-      signal?.throwIfAborted();
-      try {
-        if (media.source.startsWith("blob:")) {
-          const payload = await wc.executeJavaScript(
-            `(() => {const __name=(v)=>v;return (${readMediaBlob.toString()})(${JSON.stringify(media.source)},${JSON.stringify(media.kind)});})()`,
-          );
+        for (
+          let n = 0;
+          !read.messages.some((m) => m.id === messageId) && n < 10;
+          n++
+        ) {
           signal?.throwIfAborted();
-          return payload;
+          await this.native(wc, "scroll-history");
+          await new Promise((r) => setTimeout(r, 250));
+          read = await waitForMessengerRead(
+            async () => this.native(wc, "read"),
+            c,
+            "Tìm tin chứa media",
+          );
         }
-        const response = await wc.session.fetch(media.source, {
-          redirect: "error",
-          credentials: "include",
-          signal: signal
-            ? AbortSignal.any([signal, AbortSignal.timeout(20000)])
-            : AbortSignal.timeout(20000),
+        const options = {
+          threadId: c.platformId,
+          recipient: c.name,
+          messageId,
+          attachmentId,
+        };
+        wc.setAudioMuted(true);
+        let media = await this.native(wc, "media-source", {
+          ...options,
+          load: true,
+          nativePlayback: true,
         });
-        return await boundedMedia(response, media.kind, signal);
-      } catch (error) {
-        if (signal?.aborted) throw error;
-        throw new Error(
-          "Không tải được ảnh/âm thanh Messenger; tệp có thể đã hết hạn hoặc vượt 20 MB.",
-        );
-      }
-    });
+        if (media.playPoint) {
+          signal?.throwIfAborted();
+          await this.assertSession(wc, a);
+          if (threadIdentity(wc.getURL()) !== c.platformId)
+            throw new Error("Hội thoại đã thay đổi trước khi phát âm thanh.");
+          if (!wc.debugger.isAttached()) wc.debugger.attach("1.3");
+          for (const type of ["mousePressed", "mouseReleased"])
+            await wc.debugger.sendCommand("Input.dispatchMouseEvent", {
+              type,
+              ...media.playPoint,
+              button: "left",
+              clickCount: 1,
+            });
+        }
+        for (let n = 0; !media.source && n < 60; n++) {
+          signal?.throwIfAborted();
+          await new Promise((r) => setTimeout(r, 250));
+          media = await this.native(wc, "media-source", options);
+        }
+        if (!media.source || !allowedMediaSource(media.source))
+          throw new Error(
+            "Messenger chưa cung cấp nguồn ảnh/âm thanh được hỗ trợ. Mở tệp trong Messenger rồi thử lại.",
+          );
+        signal?.throwIfAborted();
+        try {
+          if (media.source.startsWith("blob:")) {
+            const payload = await wc.executeJavaScript(
+              `(() => {const __name=(v)=>v;return (${readMediaBlob.toString()})(${JSON.stringify(media.source)},${JSON.stringify(media.kind)});})()`,
+            );
+            signal?.throwIfAborted();
+            return payload;
+          }
+          const response = await wc.session.fetch(media.source, {
+            redirect: "error",
+            credentials: "include",
+            signal: signal
+              ? AbortSignal.any([signal, AbortSignal.timeout(20000)])
+              : AbortSignal.timeout(20000),
+          });
+          return await boundedMedia(response, media.kind, signal);
+        } catch (error) {
+          if (signal?.aborted) throw error;
+          throw new Error(
+            "Không tải được ảnh/âm thanh Messenger; tệp có thể đã hết hạn hoặc vượt 20 MB.",
+          );
+        }
+      }),
+    );
   }
   private async waitForNativeRead(
     wc: WebContents,
@@ -1011,8 +1227,12 @@ export class Browsers {
       .slice(-limit)
       .map((m) => ({ ...m, observedAt: Date.now() }));
   }
-  private showWorker(accountId: string, providedView?: WebContentsView) {
-    const view = providedView ?? this.workers.get(accountId);
+  private showWorker(
+    accountId: string,
+    providedView?: WebContentsView,
+    blocking = true,
+  ) {
+    const view = providedView;
     if (!view || view.webContents.isDestroyed()) return;
     const existing = [...this.entries.values()].find((e) => e.view === view);
     if (existing) {
@@ -1023,13 +1243,17 @@ export class Browsers {
     this.entries.set(id, {
       view,
       worker: true,
+      blocking,
       meta: {
         id,
         accountId,
         title: `${this.account(accountId).name} · Messenger cần kiểm tra`,
         url: view.webContents.getURL(),
         detached: true,
-        status: "Cần xử lý hộp thoại trong cửa sổ này",
+        status: blocking
+          ? this.pageStatuses.get(view.webContents) ||
+            "Cần xử lý hộp thoại trong cửa sổ này"
+          : "Cần kiểm tra kết quả gửi",
       },
     });
     this.detach(id);
@@ -1113,23 +1337,26 @@ export class Browsers {
     allowed: () => boolean,
     contextBound = true,
   ): Promise<void> {
-    return this.serialized(c.accountId, async () => {
-      const attempt = { clicked: false };
-      try {
-        await this.sendUnlocked(
-          c,
-          profile,
-          text,
-          basedOn,
-          allowed,
-          attempt,
-          contextBound,
-        );
-      } catch (error) {
-        if (!attempt.clicked) throw new SendNotAttemptedError(error);
-        throw error;
-      }
-    });
+    return this.serialized(`thread:${c.id}`, () =>
+      this.withConversationTask(c, async () => {
+        const attempt = { clicked: false };
+        try {
+          await this.sendUnlocked(
+            c,
+            profile,
+            text,
+            basedOn,
+            allowed,
+            attempt,
+            contextBound,
+          );
+        } catch (error) {
+          if (!attempt.clicked) throw new SendNotAttemptedError(error);
+          this.showWorker(c.accountId, this.workers.get(c.id), false);
+          throw error;
+        }
+      }),
+    );
   }
   private async sendUnlocked(
     c: Conversation,
@@ -1141,10 +1368,10 @@ export class Browsers {
     contextBound: boolean,
   ): Promise<void> {
     const a = this.account(c.accountId),
-      wc = await this.worker(a);
+      wc = await this.worker(a, c.id);
     if (
       [...this.entries.values()].some(
-        (e) => e.worker && e.meta.accountId === a.id,
+        (e) => e.worker && e.blocking !== false && e.meta.accountId === a.id,
       )
     )
       throw new Error(
@@ -1217,6 +1444,8 @@ export class Browsers {
     );
   }
   shutdown() {
+    this.stopped = true;
+    this.workerPool.stop();
     for (const timer of this.loginTimers.values()) clearInterval(timer);
     this.loginTimers.clear();
     for (const w of [
