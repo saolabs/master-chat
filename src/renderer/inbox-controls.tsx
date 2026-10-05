@@ -34,7 +34,7 @@ export function InboxControls({
       <div className="automation-summary">
         <div className="inbox-automation-state">
           <i className={!snapshot.paused && enabled ? "dot green" : "dot"} />
-          <b>
+          <b title={snapshot.paused ? snapshot.pauseReason : undefined}>
             {snapshot.paused
               ? "Tự trả lời đang dừng"
               : enabled
@@ -47,9 +47,6 @@ export function InboxControls({
             {accounts.length} tài khoản bật mặc định
           </span>
         </div>
-        {snapshot.paused && snapshot.pauseReason && (
-          <small className="pause-reason">{snapshot.pauseReason}</small>
-        )}
       </div>
       <div className="inbox-control-actions">
         <button

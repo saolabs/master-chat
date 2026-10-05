@@ -12,6 +12,22 @@ import { z } from "zod";
 import { Vault } from "./vault.ts";
 import { Browsers } from "./browser.ts";
 import { Engine } from "./engine.ts";
+import { PeopleSearchRunner } from "./people-search-runner.ts";
+import { analyzePeopleSource } from "./people-analysis.ts";
+import {
+  PeopleSearchBrowser,
+  researchSession,
+} from "./people-search-browser.ts";
+import {
+  buildPeopleCandidates,
+  peopleSearchInputSchema,
+} from "../src/core/people-search.ts";
+import {
+  buildPeopleProfile,
+  peopleReportExport,
+  peopleReportCSV,
+} from "../src/core/people-profiles.ts";
+import { writeFile } from "node:fs/promises";
 import {
   validateTranscriptionSelection,
   transcriptionMode,
@@ -105,6 +121,63 @@ const providerSchema = z
   })
   .strict();
 const commands = z.discriminatedUnion("type", [
+  z
+    .object({
+      type: z.literal("people.review"),
+      jobId: id,
+      left: id,
+      right: id,
+      decision: z.enum(["same", "different", "uncertain"]),
+      reason: z.string().trim().min(5).max(1000),
+    })
+    .strict(),
+  ...(["people.saveProfile", "people.deepen"] as const).map((type) =>
+    type === "people.deepen"
+      ? z
+          .object({
+            type: z.literal(type),
+            jobId: id,
+            candidateId: id,
+            focus: z.string().trim().min(1).max(300),
+          })
+          .strict()
+      : z
+          .object({ type: z.literal(type), jobId: id, candidateId: id })
+          .strict(),
+  ),
+  z.object({ type: z.literal("people.deleteProfile"), profileId: id }).strict(),
+  z
+    .object({
+      type: z.literal("people.deepenSaved"),
+      profileId: id,
+      focus: z.string().trim().min(1).max(300),
+    })
+    .strict(),
+  ...(["people.analyzeAll", "people.exportCSV"] as const).map((type) =>
+    z.object({ type: z.literal(type), jobId: id }).strict(),
+  ),
+  z
+    .object({ type: z.literal("people.analyze"), jobId: id, candidateId: id })
+    .strict(),
+  z
+    .object({ type: z.literal("people.start"), input: peopleSearchInputSchema })
+    .strict(),
+  ...(
+    [
+      "people.resume",
+      "people.skip",
+      "people.cancel",
+      "people.remove",
+      "people.export",
+    ] as const
+  ).map((type) => z.object({ type: z.literal(type), jobId: id }).strict()),
+  z
+    .object({
+      type: z.literal("people.browser"),
+      jobId: id,
+      url: z.string().max(2000).optional(),
+    })
+    .strict(),
   z
     .object({
       type: z.literal("response.save"),
@@ -337,6 +410,7 @@ let main: BrowserWindow | null = null,
   browsers: Browsers,
   engine: Engine,
   vault: Vault;
+let peopleSearch: PeopleSearchRunner;
 // A separate directory makes smoke testing independent of the user's real vault.
 if (process.env.MASTER_CHAT_DATA_DIR)
   app.setPath("userData", path.resolve(process.env.MASTER_CHAT_DATA_DIR));
@@ -369,6 +443,189 @@ function snapshot(): Snapshot {
 }
 async function execute(cmd: Command) {
   switch (cmd.type) {
+    case "people.review": {
+      await vault.mutate((s) => {
+        const job = s.peopleSearches?.find((j) => j.id === cmd.jobId);
+        if (!job || ["running", "waiting", "paused"].includes(job.status))
+          throw new Error("Hoàn tất hoặc dừng lượt tìm trước khi đối chiếu.");
+        if (
+          cmd.left === cmd.right ||
+          ![cmd.left, cmd.right].every((id) =>
+            job.evidence.some((e) => e.id === id),
+          )
+        )
+          throw new Error("Hai nguồn cần đối chiếu không hợp lệ.");
+        job.reviews = (job.reviews || []).filter(
+          (r) =>
+            !(
+              [r.left, r.right].includes(cmd.left) &&
+              [r.left, r.right].includes(cmd.right)
+            ),
+        );
+        job.reviews.push({
+          left: cmd.left,
+          right: cmd.right,
+          decision: cmd.decision,
+          reason: cmd.reason,
+          createdAt: Date.now(),
+        });
+        job.candidates = buildPeopleCandidates(job);
+      });
+      engine.report("Đã lưu quyết định đối chiếu hồ sơ.");
+      break;
+    }
+    case "people.saveProfile": {
+      await vault.mutate((s) => {
+        const job = s.peopleSearches?.find((j) => j.id === cmd.jobId),
+          candidate = job?.candidates.find((c) => c.id === cmd.candidateId);
+        if (!job || !candidate) throw new Error("Hồ sơ không tồn tại.");
+        const now = Date.now(),
+          report = buildPeopleProfile(job, candidate),
+          existing = s.savedPeopleProfiles?.find(
+            (p) => p.jobId === job.id && p.candidateId === candidate.id,
+          );
+        const version = {
+          createdAt: now,
+          report,
+          input: structuredClone(job.input),
+          evidence: structuredClone(
+            job.evidence.filter((e) => candidate.evidenceIds.includes(e.id)),
+          ),
+          analyses: structuredClone(
+            Object.fromEntries(
+              Object.entries(job.analyses || {}).filter(([, a]) =>
+                candidate.evidenceIds.includes(a.evidenceId),
+              ),
+            ),
+          ),
+        };
+        if (existing) {
+          existing.versions = [version, ...existing.versions].slice(0, 10);
+          existing.updatedAt = now;
+        } else
+          s.savedPeopleProfiles = [
+            {
+              id: randomUUID(),
+              jobId: job.id,
+              candidateId: candidate.id,
+              createdAt: now,
+              updatedAt: now,
+              versions: [version],
+            },
+            ...(s.savedPeopleProfiles || []),
+          ];
+      });
+      engine.report("Đã lưu phiên bản hồ sơ vào thư viện riêng trên máy.");
+      break;
+    }
+    case "people.deleteProfile":
+      await vault.mutate((s) => {
+        s.savedPeopleProfiles = s.savedPeopleProfiles?.filter(
+          (p) => p.id !== cmd.profileId,
+        );
+      });
+      break;
+    case "people.deepen": {
+      const job = vault.read().peopleSearches?.find((j) => j.id === cmd.jobId),
+        candidate = job?.candidates.find((c) => c.id === cmd.candidateId);
+      if (!job || !candidate) throw new Error("Hồ sơ không tồn tại.");
+      await peopleSearch.start(
+        { ...job.input, profileUrl: candidate.url, depth: "deep" },
+        { focus: cmd.focus, parentJobId: job.id },
+      );
+      break;
+    }
+    case "people.deepenSaved": {
+      const saved = vault
+          .read()
+          .savedPeopleProfiles?.find((p) => p.id === cmd.profileId),
+        version = saved?.versions[0];
+      if (!saved || !version) throw new Error("Hồ sơ đã lưu không tồn tại.");
+      await peopleSearch.start(
+        {
+          ...version.input,
+          profileUrl: version.report.primaryUrl,
+          depth: "deep",
+        },
+        { focus: cmd.focus, parentJobId: saved.jobId },
+      );
+      break;
+    }
+    case "people.analyzeAll": {
+      const job = vault.read().peopleSearches?.find((j) => j.id === cmd.jobId);
+      if (!job || ["running", "waiting", "paused"].includes(job.status))
+        throw new Error("Hoàn tất hoặc dừng tìm kiếm trước khi dựng báo cáo.");
+      let succeeded = 0,
+        failed = 0;
+      for (const c of job.candidates.filter((c) =>
+        c.evidenceIds.some((id) =>
+          job.evidence.some((e) => e.id === id && e.text),
+        ),
+      )) {
+        try {
+          await analyzePeopleSource(vault, job.id, c.id);
+          succeeded++;
+        } catch {
+          failed++;
+        }
+        changed();
+      }
+      engine.report(
+        `Đã dựng báo cáo ${succeeded} hồ sơ; ${failed} hồ sơ chưa phân tích được.`,
+      );
+      break;
+    }
+    case "people.analyze":
+      await analyzePeopleSource(vault, cmd.jobId, cmd.candidateId);
+      engine.report(
+        "Đã lưu báo cáo AI kèm đoạn dẫn nguồn. Kiểm tra chủ thể và diễn giải trước khi sử dụng.",
+      );
+      break;
+    case "people.start":
+      if (cmd.input.accountId) browsers.account(cmd.input.accountId);
+      await peopleSearch.start(cmd.input);
+      break;
+    case "people.resume":
+      await peopleSearch.resume(cmd.jobId);
+      break;
+    case "people.skip":
+      await peopleSearch.skip(cmd.jobId);
+      break;
+    case "people.cancel":
+      await peopleSearch.cancel(cmd.jobId);
+      break;
+    case "people.remove":
+      await peopleSearch.remove(cmd.jobId);
+      break;
+    case "people.browser":
+      await peopleSearch.show(cmd.jobId, cmd.url);
+      break;
+    case "people.exportCSV":
+    case "people.export": {
+      const job = vault.read().peopleSearches?.find((j) => j.id === cmd.jobId);
+      if (!job || !main) throw new Error("Lượt tìm kiếm không tồn tại.");
+      const csv = cmd.type === "people.exportCSV";
+      const result = await dialog.showSaveDialog(main, {
+        title: "Xuất kết quả tìm người",
+        defaultPath: `people-search-${new Date(job.createdAt).toISOString().slice(0, 10)}.${csv ? "csv" : "json"}`,
+        filters: [
+          { name: csv ? "CSV" : "JSON", extensions: [csv ? "csv" : "json"] },
+        ],
+      });
+      if (!result.canceled && result.filePath) {
+        await writeFile(
+          result.filePath,
+          csv
+            ? peopleReportCSV(job)
+            : JSON.stringify(peopleReportExport(job), null, 2),
+          {
+            mode: 0o600,
+          },
+        );
+        engine.report("Đã xuất kết quả tìm người vào file bạn chọn.");
+      }
+      break;
+    }
     case "response.save":
       await engine.configure(() =>
         vault.mutate((s) => {
@@ -778,6 +1035,21 @@ app.whenReady().then(async () => {
       engine?.pause(reason),
     );
     engine = new Engine(vault, browsers, changed);
+    peopleSearch = new PeopleSearchRunner(
+      vault,
+      new PeopleSearchBrowser(async (accountId) =>
+        accountId ? browsers.researchSession(accountId) : researchSession(),
+      ),
+      changed,
+      async (jobId, candidateId, signal) => {
+        if (!(vault.read().ai.tasks.knowledge || vault.read().ai.default))
+          return;
+        await analyzePeopleSource(vault, jobId, candidateId, undefined, {
+          signal,
+        });
+        changed();
+      },
+    );
     const reconnect = () => {
       browsers.invalidateSync();
       void engine.refreshSync();
@@ -838,6 +1110,7 @@ app.whenReady().then(async () => {
     main.on("close", () => {
       powerMonitor.removeListener("resume", reconnect);
       engine.shutdown();
+      peopleSearch.shutdown();
       browsers.shutdown();
     });
     main.on("closed", () => {

@@ -7,11 +7,13 @@ export type PinProbe =
   | "filled"
   | "single"
   | "split"
+  | "pending"
+  | "accepted"
   | "submitted";
 
 // Runs only inside the account's sandboxed Facebook WebContents. Never returns a PIN or dialog text.
 export function messengerPin(
-  action: "probe" | "fill" | "confirm" | "focus",
+  action: "probe" | "fill" | "confirm" | "focus" | "progress",
   pin = "",
   index = 0,
 ): PinProbe {
@@ -34,6 +36,16 @@ export function messengerPin(
       .toLowerCase()
       .replace(/\s+/g, " ")
       .trim();
+  if (
+    Array.from(document.querySelectorAll('h1,h2,h3,[role="heading"]'))
+      .filter(visible)
+      .some((heading) =>
+        /^(?:ban tam thoi bi chan|you(?:'re| are) temporarily blocked)[.!]?$/.test(
+          normalized(heading.textContent || ""),
+        ),
+      )
+  )
+    return "rejected";
   const dialogs = Array.from(
     document.querySelectorAll<HTMLElement>(
       '[role="dialog"], [aria-modal="true"]',
@@ -117,8 +129,7 @@ export function messengerPin(
   ).filter(
     (e) =>
       visible(e) &&
-      !e.disabled &&
-      !e.readOnly &&
+      (action === "progress" || (!e.disabled && !e.readOnly)) &&
       ["password", "text", "tel", "number"].includes(e.type),
   );
   const single =
@@ -140,6 +151,28 @@ export function messengerPin(
       ));
   const split = inputs.length === 6 && inputs.every((e) => e.maxLength === 1);
   if (!single && !split) return "unsupported";
+  if (action === "progress") {
+    if (
+      !/^\d{6}$/.test(pin) ||
+      !Number.isInteger(index) ||
+      index < 1 ||
+      index > (split ? 6 : 1)
+    )
+      return "unsupported";
+    const expected = inputs.map((_, i) =>
+      split ? (i < index ? pin[i] : "") : pin,
+    );
+    // A cleared or partially rendered value can settle later. A conflicting
+    // value is a human edit or changed form: never overwrite it or reinsert.
+    if (inputs.some((input, i) => !expected[i].startsWith(input.value)))
+      return "manual";
+    return inputs.every(
+      (input, i) =>
+        input.value === expected[i] && !input.disabled && !input.readOnly,
+    )
+      ? "accepted"
+      : "pending";
+  }
   if (action === "focus") {
     if (
       !/^\d{6}$/.test(pin) ||
@@ -208,9 +241,30 @@ export function messengerPin(
 }
 
 export function messengerPinScript(
-  action: "probe" | "fill" | "confirm" | "focus",
+  action: "probe" | "fill" | "confirm" | "focus" | "progress",
   pin = "",
   index = 0,
 ) {
   return `(() => {const __name=(value)=>value; return (${messengerPin.toString()})(${JSON.stringify(action)},${JSON.stringify(pin)},${JSON.stringify(index)});})()`;
+}
+
+// Wait for two matching DOM observations separated by a render interval.
+// Time passing alone never authorizes the next input, and a timeout never retries it.
+export async function waitForPinInput(
+  capture: () => Promise<PinProbe>,
+  delay = () => new Promise<void>((resolve) => setTimeout(resolve, 250)),
+): Promise<PinProbe> {
+  let accepted = false;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    await delay();
+    const result = await capture();
+    if (result === "accepted") {
+      if (accepted) return result;
+      accepted = true;
+    } else {
+      accepted = false;
+      if (result !== "pending") return result;
+    }
+  }
+  return "pending";
 }

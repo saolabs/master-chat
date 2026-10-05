@@ -80,7 +80,7 @@ test("global controls distinguish paused, running and sync-only states", () => {
   try {
     assert.match(d.window.document.body.textContent!, /Tự trả lời đang dừng/);
     assert.equal(d.window.document.querySelector("button")!.disabled, false);
-    assert.match(d.window.document.body.textContent!, /App vừa mở/);
+    assert.equal(d.window.document.querySelector("b")?.title, "App vừa mở");
     assert.equal(
       d.window.document
         .querySelector('[role="toolbar"]')

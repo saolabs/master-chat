@@ -317,15 +317,38 @@ app.whenReady().then(async () => {
     state.accounts[0].recoveryPin = "012345";
     state.accounts[0].autoRestorePin = true;
     await worker.executeJavaScript(
-      `(()=>{window.pinEvents=0;const modal=document.createElement('div');modal.id='restore-pin';modal.setAttribute('role','dialog');modal.innerHTML='<h2>Nhập mã PIN để khôi phục đoạn chat của bạn</h2>'+Array.from({length:6},()=>'<input type="password" maxlength="1">').join('');modal.addEventListener('input',()=>{window.pinEvents++;const value=Array.from(modal.querySelectorAll('input')).map(i=>i.value).join('');if(value==='012345')modal.remove();});document.body.append(modal);})()`,
+      `(()=>{window.pinEvents=0;window.pinTimes=[];const modal=document.createElement('div');modal.id='restore-pin';modal.setAttribute('role','dialog');modal.innerHTML='<h2>Nhập mã PIN để khôi phục đoạn chat của bạn</h2>'+Array.from({length:6},()=>'<input type="password" maxlength="1">').join('');modal.addEventListener('input',()=>{window.pinEvents++;window.pinTimes.push(performance.now());const inputs=Array.from(modal.querySelectorAll('input'));const value=inputs.map(i=>i.value).join('');if(value==='012345'){modal.remove();return;}inputs.forEach(input=>input.disabled=true);setTimeout(()=>inputs.forEach(input=>{const updated=input.cloneNode();updated.value=input.value;updated.disabled=false;input.replaceWith(updated);}),350);});document.body.append(modal);})()`,
     );
     await b.readConversation(c);
     assert.equal(await worker.executeJavaScript("window.pinEvents"), 6);
+    const pinTimes = (await worker.executeJavaScript(
+      "window.pinTimes",
+    )) as number[];
+    for (let i = 1; i < pinTimes.length; i++)
+      assert.ok(
+        pinTimes[i] - pinTimes[i - 1] >= 350,
+        "next digit must wait for the replaced field to become ready",
+      );
     assert.equal(state.accounts[0].pinAutoFillBlocked, false);
     assert.equal(
       b.list().some((tab) => tab.title.endsWith("Messenger cần kiểm tra")),
       false,
     );
+    // A block appearing between split digits ends the attempt before any further input.
+    await worker.executeJavaScript(
+      `(()=>{window.pinEvents=0;const modal=document.createElement('div');modal.id='restore-pin';modal.setAttribute('role','dialog');modal.innerHTML='<h2>Nhập mã PIN để khôi phục đoạn chat của bạn</h2>'+ '<input type="password" maxlength="1">'.repeat(6);modal.addEventListener('input',()=>{window.pinEvents++;setTimeout(()=>{const block=document.createElement('h1');block.id='mid-pin-block';block.textContent='Bạn tạm thời bị chặn';document.body.append(block);},100);});document.body.append(modal);})()`,
+    );
+    assert.equal(await restoreAbandoned(worker, account), "blocked");
+    assert.equal(await worker.executeJavaScript("window.pinEvents"), 1);
+    assert.equal(state.accounts[0].pinAutoFillBlocked, true);
+    assert.equal(state.accounts[0].pinRestorePending, false);
+    assert.equal(await restoreAbandoned(worker, account), "blocked");
+    assert.equal(await worker.executeJavaScript("window.pinEvents"), 1);
+    await worker.executeJavaScript(
+      `document.querySelector('#restore-pin').remove();document.querySelector('#mid-pin-block').remove()`,
+    );
+    state.accounts[0].pinAutoFillBlocked = false;
+    state.accounts[0].pinRestorePending = false;
     // A widget that clears the entered PIN without a confirmed result must not
     // release the retry guard just because its input is empty again.
     await worker.executeJavaScript(
@@ -337,6 +360,20 @@ app.whenReady().then(async () => {
       }
     ).restorePin.bind(b);
     assert.equal(await clearedRestore(worker, account), "blocked");
+    assert.equal(
+      await worker.executeJavaScript("window.pinEvents"),
+      1,
+      "cleared PIN was inserted only once in the first attempt",
+    );
+    assert.equal(state.accounts[0].pinAutoFillBlocked, true);
+    assert.equal(state.accounts[0].pinRestorePending, false);
+    const readyMonitor = (
+      b as unknown as { monitors: Map<string, Electron.WebContentsView> }
+    ).monitors.get(account.id)!;
+    assert.equal(
+      await restoreAbandoned(readyMonitor.webContents, account),
+      "absent",
+    );
     assert.equal(state.accounts[0].pinAutoFillBlocked, true);
     assert.equal(await clearedRestore(worker, account), "blocked");
     assert.equal(await worker.executeJavaScript("window.pinEvents"), 1);

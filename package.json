@@ -14,6 +14,7 @@
     "format:check": "prettier --check electron src tests electron.vite.config.ts index.html tsconfig.json package.json",
     "test": "node --import tsx --test tests/*.test.ts tests/*.test.tsx",
     "test:browser": "esbuild tests/electron-messenger-smoke.ts --bundle --platform=node --external:electron --format=cjs --outfile=out/tests/electron-messenger-smoke.cjs && electron out/tests/electron-messenger-smoke.cjs",
+    "test:people-browser": "esbuild tests/electron-people-search-smoke.ts --bundle --platform=node --external:electron --format=cjs --outfile=out/tests/electron-people-search-smoke.cjs && electron out/tests/electron-people-search-smoke.cjs",
     "dist:mac": "npm run build && electron-builder --mac",
     "dist:win": "npm run build && electron-builder --win",
     "setup:speech": "bash scripts/setup-speech.sh"
@@ -28,6 +29,7 @@
     "@tiptap/pm": "^3.31.4",
     "@tiptap/react": "^3.31.4",
     "html-to-text": "^10.0.1",
+    "libphonenumber-js": "^1.13.14",
     "lucide-react": "^1.52.0",
     "pdfjs-dist": "^6.4.299",
     "react": "^19.1.1",

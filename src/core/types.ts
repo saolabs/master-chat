@@ -1,3 +1,5 @@
+import type { PeopleSearchInput, PeopleSearchJob } from "./people-search.ts";
+import type { SavedPeopleProfile } from "./people-profiles.ts";
 export type Platform = "messenger-personal";
 export type Role = "summary" | "knowledge" | "reply";
 export type Account = {
@@ -209,6 +211,8 @@ export type State = {
   profiles: Partial<Record<Platform, DOMProfile>>;
   enabledAt: number | null;
   response?: ResponseSettings;
+  peopleSearches?: PeopleSearchJob[];
+  savedPeopleProfiles?: SavedPeopleProfile[];
 };
 export function emptyState(): State {
   return {
@@ -307,6 +311,32 @@ export type MonitorStatus = {
   error?: string;
 };
 export type Command =
+  | {
+      type: "people.review";
+      jobId: string;
+      left: string;
+      right: string;
+      decision: "same" | "different" | "uncertain";
+      reason: string;
+    }
+  | { type: "people.saveProfile"; jobId: string; candidateId: string }
+  | { type: "people.deleteProfile"; profileId: string }
+  | { type: "people.deepen"; jobId: string; candidateId: string; focus: string }
+  | { type: "people.deepenSaved"; profileId: string; focus: string }
+  | { type: "people.analyzeAll"; jobId: string }
+  | { type: "people.exportCSV"; jobId: string }
+  | { type: "people.start"; input: PeopleSearchInput }
+  | { type: "people.analyze"; jobId: string; candidateId: string }
+  | {
+      type:
+        | "people.resume"
+        | "people.skip"
+        | "people.cancel"
+        | "people.remove"
+        | "people.export";
+      jobId: string;
+    }
+  | { type: "people.browser"; jobId: string; url?: string }
   | {
       type: "account.save";
       id?: string;

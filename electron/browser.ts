@@ -20,6 +20,7 @@ import { readScript, sendCheck } from "../src/core/dom.ts";
 import { loginScript, type LoginProbe } from "../src/core/login.ts";
 import {
   messengerPinScript,
+  waitForPinInput,
   type PinProbe,
 } from "../src/core/messenger-pin.ts";
 import {
@@ -76,6 +77,9 @@ export class Browsers {
   ) {}
   list() {
     return Array.from(this.entries.values()).map((e) => ({ ...e.meta }));
+  }
+  researchSession(accountId: string) {
+    return this.accountSession(this.account(accountId));
   }
   account(id: string) {
     const a = this.vault.read().accounts.find((a) => a.id === id);
@@ -262,6 +266,7 @@ export class Browsers {
     // All failures are fixed messages: execution errors must never echo source code containing the secret.
     let reserved = false;
     try {
+      this.assertNotRateLimited(original.id);
       facebookUrl(wc.getURL());
       const probe = (await this.pinScript(
         wc,
@@ -327,6 +332,7 @@ export class Browsers {
       let inputAttempted = false;
       if (result === "single" || result === "split") {
         const split = result === "split";
+        let completedInputs = 0;
         if (!wc.debugger.isAttached()) wc.debugger.attach("1.3");
         for (let index = 0; index < (split ? 6 : 1); index++) {
           if (index) {
@@ -340,14 +346,42 @@ export class Browsers {
           await wc.debugger.sendCommand("Input.insertText", {
             text: split ? a.recoveryPin[index] : a.recoveryPin,
           });
+          completedInputs = index + 1;
+          result = await waitForPinInput(async () => {
+            if (wc.isDestroyed() || this.stopped) return "unsupported";
+            this.assertNotRateLimited(a.id);
+            const current = this.account(a.id);
+            if (
+              !current.autoRestorePin ||
+              current.recoveryPin !== a.recoveryPin
+            )
+              return "unsupported";
+            return (await this.pinScript(
+              wc,
+              messengerPinScript("progress", a.recoveryPin, index + 1),
+            )) as PinProbe;
+          });
+          // Auto-submit can remove the form only after the final input.
+          if (result !== "accepted") break;
         }
-        result = (await this.pinScript(
-          wc,
-          messengerPinScript("confirm", a.recoveryPin),
-        )) as PinProbe;
-        if (result === "absent") result = "submitted";
+        if (result === "accepted")
+          result = (await this.pinScript(
+            wc,
+            messengerPinScript("confirm", a.recoveryPin),
+          )) as PinProbe;
+        if (result === "absent" && completedInputs === (split ? 6 : 1))
+          result = "submitted";
       }
       if (result !== "submitted" && result !== "filled") {
+        // A failed input is not a pending submission. Otherwise a different
+        // already-open page can mistake its own ready inbox for this attempt's
+        // success and release the persisted no-retry guard.
+        if (inputAttempted || result === "rejected")
+          await this.vault.mutate((state) => {
+            const current = state.accounts.find((x) => x.id === a.id);
+            if (current && current.recoveryPin === a.recoveryPin)
+              current.pinRestorePending = false;
+          });
         // A form that changed before any input was supplied is safe to re-probe.
         if (!inputAttempted && ["absent", "manual"].includes(result))
           await this.vault.mutate((state) => {

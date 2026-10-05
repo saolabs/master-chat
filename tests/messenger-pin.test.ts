@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
-import { messengerPinScript } from "../src/core/messenger-pin.ts";
+import {
+  messengerPinScript,
+  waitForPinInput,
+  type PinProbe,
+} from "../src/core/messenger-pin.ts";
 import { updateAccount } from "../src/core/settings.ts";
 import { emptyState, publicState, type Account } from "../src/core/types.ts";
 function page(html: string, url = "https://www.facebook.com/messages/t/123/") {
@@ -21,7 +25,7 @@ function page(html: string, url = "https://www.facebook.com/messages/t/123/") {
   return {
     dom,
     invoke: (
-      action: "probe" | "fill" | "confirm" | "focus" = "probe",
+      action: Parameters<typeof messengerPinScript>[0] = "probe",
       pin = "012345",
       index = 0,
     ) => dom.window.eval(messengerPinScript(action, pin, index)),
@@ -220,4 +224,88 @@ test("native PIN focus validates labelled fields and each previously entered spl
   inputs[0].value = "9";
   assert.equal(split.invoke("focus", "012345", 1), "manual");
   split.dom.window.close();
+});
+
+test("PIN progress observes rendered values without changing input or submitting", () => {
+  for (const split of [false, true]) {
+    const p = page(
+      fixture(
+        split
+          ? '<input type="password" maxlength="1">'.repeat(6)
+          : '<input type="password" maxlength="6">',
+      ),
+    );
+    const inputs = p.dom.window.document.querySelectorAll("input");
+    let events = 0;
+    p.dom.window.document.addEventListener("input", () => events++);
+    assert.equal(p.invoke("progress", "012345", 1), "pending");
+    inputs[0].value = split ? "0" : "012345";
+    inputs[0].disabled = true;
+    assert.equal(p.invoke("progress", "012345", 1), "pending");
+    inputs[0].disabled = false;
+    assert.equal(p.invoke("progress", "012345", 1), "accepted");
+    inputs[0].value = "9";
+    assert.equal(p.invoke("progress", "012345", 1), "manual");
+    assert.equal(inputs[0].value, "9");
+    assert.equal(events, 0);
+    p.dom.window.close();
+  }
+});
+test("PIN progress stops on Facebook rejection even with a recovery form still present", () => {
+  for (const title of ["Bạn tạm thời bị chặn", "You're temporarily blocked"]) {
+    const p = page(fixture() + `<h1>${title}</h1>`);
+    assert.equal(p.invoke("focus"), "rejected");
+    assert.equal(p.invoke("progress", "012345", 1), "rejected");
+    assert.equal(p.dom.window.document.querySelector("input")!.value, "");
+    p.dom.window.close();
+  }
+});
+test("PIN wait requires stable acceptance, respects rejection and bounds pending input", async () => {
+  let waits = 0;
+  const states: PinProbe[] = [
+    "pending",
+    "accepted",
+    "pending",
+    "accepted",
+    "accepted",
+  ];
+  assert.equal(
+    await waitForPinInput(
+      async () => states.shift()!,
+      async () => {
+        waits++;
+      },
+    ),
+    "accepted",
+  );
+  assert.equal(waits, 5);
+  for (const terminal of [
+    "rejected",
+    "manual",
+    "absent",
+    "unsupported",
+  ] as const) {
+    waits = 0;
+    assert.equal(
+      await waitForPinInput(
+        async () => terminal,
+        async () => {
+          waits++;
+        },
+      ),
+      terminal,
+    );
+    assert.equal(waits, 1);
+  }
+  waits = 0;
+  assert.equal(
+    await waitForPinInput(
+      async () => "pending",
+      async () => {
+        waits++;
+      },
+    ),
+    "pending",
+  );
+  assert.equal(waits, 20);
 });

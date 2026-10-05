@@ -16,6 +16,7 @@ Kiểm tra và đóng gói:
 ```sh
 npm test
 npm run test:browser # Chromium fixture cục bộ
+npm run test:people-browser # Tìm người / CAPTCHA bằng Chromium fixture
 npm run typecheck
 npm run format:check
 npm run build
@@ -24,6 +25,20 @@ npm run dist:win
 ```
 
 Các cấu hình builder đã có; chưa tạo installer ký số và chưa chạy thử Windows. Không coi việc compile thành công là đã kiểm chứng Facebook hoặc installer trên mọi OS.
+
+## Tìm người chuyên sâu
+
+Mở **Tìm người** để tìm bằng tên, email, số điện thoại/mã quốc gia hoặc username. **Thông tin nâng cao** mặc định thu gọn, có họ/tên riêng, tổ chức, URL và tối đa 10 tiêu chí bổ sung như trường học, tỉnh/thành, thông tin tùy chỉnh. Có ngôn ngữ kết quả và bốn mức tìm kiếm **Nhanh / Tiêu chuẩn / Mở rộng / Toàn diện**, theo ngân sách gốc của seo-expert: 6/11/15/42 truy vấn web mỗi công cụ và 12/40/80/500 nguồn.
+
+Bộ lập truy vấn gốc gồm tìm đầu mối độc lập, tên + tiêu chí, biến thể tên/username/số điện thoại và truy vấn theo nền tảng. Google/Bing/DuckDuckGo tìm web; tùy chọn **Tìm trực tiếp** mở People/tài khoản trong Facebook, Instagram, LinkedIn, X, YouTube, TikTok bằng Chromium. Có theo trang Next quan sát được, đọc root tài khoản và theo liên kết nguồn công bố trong hạn mức. Khi gặp CAPTCHA/đăng nhập/consent, xử lý thủ công trong trình duyệt rồi **Tiếp tục**. Unknown DOM giữ trạng thái chờ; **Bỏ qua** ghi thiếu coverage. Có thể chọn phiên Facebook trong app; phiên nghiên cứu riêng không yêu cầu tài khoản Messenger.
+
+Sau khi bắt đầu, biểu mẫu thu gọn để ưu tiên kết quả; dùng **Sửa tìm kiếm / Tìm kiếm mới** để mở lại. Các tab **Hồ sơ ứng viên / Nguồn & tiến trình / Thư viện đã lưu** tách báo cáo tổng hợp, source snapshots và phiên bản hồ sơ. URL cùng tài khoản được tập hợp; các tài khoản trùng tên được giữ riêng. Có đối chiếu hai nguồn **Cùng người / Khác người / Chưa rõ** kèm lý do.
+
+Model **Tri thức** hoặc model chung có thể tự dựng báo cáo khi tìm xong. Hồ sơ gồm học tập, công việc, tổ chức, thành tựu, hoạt động nghề nghiệp và dòng thời gian, với đoạn dẫn nguyên văn, offsets, model và hash nguồn. Kiểm tra chủ thể và thời gian trước khi lưu dữ kiện; người dùng vẫn cần kiểm tra diễn giải. Confidence về tiêu chí không phải xác minh danh tính ngoài đời. Không gửi cookie/credentials tới AI, không tự đưa kết quả vào prompt trả lời Messenger.
+
+**Lưu hồ sơ** giữ phiên bản trong thư viện riêng kể cả sau khi xóa lượt tìm. **Nghiên cứu sâu hơn** tạo lượt mới theo hướng được chọn. **Xuất JSON / CSV** xuất báo cáo có nguồn/đoạn dẫn/thiếu dữ kiện, không xuất queries, session hay toàn bộ source text. Dữ liệu lưu trong vault mã hóa; file xuất là văn bản rõ tại vị trí bạn chọn.
+
+Đã chuyển planner và workflow tìm người, chưa chuyển các API/connector và hạ tầng server của seo-expert. Direct search phụ thuộc DOM/đăng nhập của từng nền tảng. Chi tiết hạn mức và kiểm chứng: [Tìm người trên desktop](docs/PEOPLE-SEARCH.md).
 
 ## Sử dụng bản nền tảng
 

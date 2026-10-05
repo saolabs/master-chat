@@ -12,6 +12,8 @@ import { AISettings } from "./ai-settings.tsx";
 import { AccountSettings } from "./account-settings.tsx";
 import { KnowledgeSettings } from "./knowledge-settings.tsx";
 import { InboxControls, InboxRows } from "./inbox-controls.tsx";
+import { AppFeedback } from "./app-feedback.tsx";
+import { PeopleSearch } from "./people-search.tsx";
 import {
   ConversationPanel,
   type ComposerState,
@@ -42,6 +44,7 @@ const PROFILE: DOMProfile = {
 const MENU = [
   ["inbox", "Hội thoại", "↗"],
   ["browser", "Trình duyệt", "▣"],
+  ["people", "Tìm người", "⌕"],
   ["accounts", "Tài khoản", "◎"],
   ["ai", "Cấu hình AI", "✦"],
   ["knowledge", "Tri thức", "◇"],
@@ -85,7 +88,6 @@ function App() {
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
     [sidebarCollapsed, setSidebarCollapsed] = useState(false),
-    [activityOpen, setActivityOpen] = useState(false),
     [selected, setSelected] = useState(""),
     [activeTab, setActiveTab] = useState("");
   const browserArea = useRef<HTMLDivElement>(null);
@@ -269,33 +271,11 @@ function App() {
         <div className="app-toolbar">
           <InboxControls snapshot={snapshot} busy={busy} run={run} />
         </div>
-        <div className="activity-bar">
-          <button
-            className="activity-toggle"
-            aria-expanded={activityOpen}
-            onClick={() => setActivityOpen(!activityOpen)}
-            title={snapshot.notice || "Hoạt động gần đây"}
-          >
-            <span>{snapshot.notice || "Hoạt động gần đây"}</span>
-            <span aria-hidden="true">{activityOpen ? "⌃" : "⌄"}</span>
-          </button>
-        </div>
-        {activityOpen && (
-          <div className="activity-panel" role="status">
-            <p>{snapshot.notice}</p>
-            <small>
-              {data.enabledAt
-                ? `Mốc bắt đầu: ${new Date(data.enabledAt).toLocaleString("vi-VN")}`
-                : "Chưa thiết lập mốc bắt đầu"}
-            </small>
-          </div>
-        )}
-        {error && (
-          <div className="error" role="alert">
-            {error}
-            <button onClick={() => setError("")}>×</button>
-          </div>
-        )}
+        <AppFeedback
+          snapshot={snapshot}
+          error={error}
+          dismissError={() => setError("")}
+        />
         <main
           className={
             page === "inbox" || page === "browser"
@@ -583,6 +563,9 @@ function App() {
               run={run}
               open={(id) => void opens(id)}
             />
+          )}
+          {page === "people" && (
+            <PeopleSearch snapshot={snapshot} busy={busy} run={run} />
           )}
           {page === "ai" && (
             <AISettings

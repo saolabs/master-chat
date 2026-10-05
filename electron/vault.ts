@@ -52,6 +52,18 @@ export class Vault {
       )
         throw new Error("Phiên bản vault không được hỗ trợ.");
       this.state.ai = migrateAI(this.state.ai);
+      for (const job of this.state.peopleSearches || []) {
+        if (job.analyzing) {
+          job.analyzing = false;
+          job.message =
+            "Phân tích bị gián đoạn. Dựng lại báo cáo để tiếp tục; nguồn đã đọc được giữ nguyên.";
+        }
+        if (job.status === "running" || job.status === "waiting") {
+          job.status = "paused";
+          job.message =
+            "Lượt tìm kiếm bị gián đoạn. Bấm Tiếp tục để mở lại trang đang đọc.";
+        }
+      }
       for (const d of this.state.drafts) {
         if (d.status === "sending") d.status = "uncertain";
         delete d.sendAfter;
