@@ -69,6 +69,7 @@ export type MessengerRead = {
   blocked: boolean;
   blockedReason?: string;
   recoveryRequired?: boolean;
+  rateLimited?: boolean;
   revision: number;
 };
 export type NativeOptions = {
@@ -129,15 +130,28 @@ export function messengerDOM(
   const dialog = Array.from(document.querySelectorAll('[role="dialog"]')).find(
     visible,
   );
-  const blockedReason = /checkpoint|two_factor|two_step|challenge/.test(
-    location.pathname,
-  )
-    ? "Facebook yêu cầu xác minh tài khoản."
-    : authInput
-      ? "Messenger đang yêu cầu đăng nhập hoặc mã PIN."
-      : dialog
-        ? `Messenger có hộp thoại đang mở${dialog.getAttribute("aria-label") ? `: ${norm(dialog.getAttribute("aria-label")!).slice(0, 120)}` : "."}`
-        : undefined;
+  // Facebook can render this as a full page with old chat popups still present.
+  // Match visible page headings, never another person's message text.
+  const rateLimited = Array.from(
+    document.querySelectorAll('h1,h2,h3,[role="heading"]'),
+  ).some(
+    (heading) =>
+      visible(heading) &&
+      /^(?:ban tam thoi bi chan|you(?:'|’)re temporarily blocked|you are temporarily blocked|temporarily blocked)\s*[.!]?$/i.test(
+        plain(heading.textContent ?? "").trim(),
+      ),
+  );
+  const rateLimitReason =
+    "Facebook tạm thời chặn tính năng do thao tác quá nhanh. Đồng bộ tài khoản đã dừng; chờ Facebook gỡ chặn rồi mở tab Messenger và bấm Tải lại để kiểm tra.";
+  const blockedReason = rateLimited
+    ? rateLimitReason
+    : /checkpoint|two_factor|two_step|challenge/.test(location.pathname)
+      ? "Facebook yêu cầu xác minh tài khoản."
+      : authInput
+        ? "Messenger đang yêu cầu đăng nhập hoặc mã PIN."
+        : dialog
+          ? `Messenger có hộp thoại đang mở${dialog.getAttribute("aria-label") ? `: ${norm(dialog.getAttribute("aria-label")!).slice(0, 120)}` : "."}`
+          : undefined;
   const blocked = Boolean(blockedReason);
   const dialogTitle = dialog
     ? plain(
@@ -148,13 +162,17 @@ export function messengerDOM(
           .join(" ")}`,
       )
     : "";
-  const recoveryRequired = Boolean(
-    authInput ||
-    /checkpoint|two_factor|two_step|challenge/.test(location.pathname) ||
-    /khoi phuc|restore|recovery|dong bo lich su|sync (?:your )?chat history|nhap (?:ma )?pin|enter (?:your )?pin|xac minh|verification/.test(
-      dialogTitle,
-    ),
-  );
+  if (rateLimited && action !== "read")
+    throw Object.assign(new Error(rateLimitReason), { rateLimited: true });
+  const recoveryRequired =
+    !rateLimited &&
+    Boolean(
+      authInput ||
+      /checkpoint|two_factor|two_step|challenge/.test(location.pathname) ||
+      /khoi phuc|restore|recovery|dong bo lich su|sync (?:your )?chat history|nhap (?:ma )?pin|enter (?:your )?pin|xac minh|verification/.test(
+        dialogTitle,
+      ),
+    );
   const hash = (s: string) => {
     let a = 2166136261,
       b = 2246822519,
@@ -576,6 +594,7 @@ export function messengerDOM(
     blocked,
     blockedReason,
     recoveryRequired,
+    rateLimited,
     revision: w.__masterChatDOM.revision,
   };
   if (action === "read") return result;

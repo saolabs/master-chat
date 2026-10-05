@@ -71,6 +71,51 @@ function renderedConversation(d: JSDOM) {
   doc.body.append(region);
   return region;
 }
+test("Facebook temporary feature block is detected even with a usable old chat popup", () => {
+  for (const title of [
+    "Bạn tạm thời bị chặn".normalize("NFD"),
+    "You're Temporarily Blocked",
+  ]) {
+    const { d, run } = fixture();
+    try {
+      d.window.document.body.insertAdjacentHTML(
+        "afterbegin",
+        `<main><h2>${title}</h2><p>Do sử dụng quá nhanh.</p></main>`,
+      );
+      const read = run("read");
+      assert.equal(read.composerPresent, true);
+      assert.equal(read.blocked, true);
+      assert.equal(read.rateLimited, true);
+      assert.equal(read.recoveryRequired, false);
+      assert.match(read.blockedReason, /Facebook tạm thời chặn/);
+      for (const action of [
+        "inbox",
+        "scroll-history",
+        "media-source",
+        "focus",
+      ] as const)
+        assert.throws(() => run(action), /Đồng bộ tài khoản đã dừng/);
+    } finally {
+      d.window.close();
+    }
+  }
+});
+test("temporary block text in a message or hidden heading does not stop a normal page", () => {
+  const { d, run } = fixture(
+    message("Tôi là DEV", "10:19", "Bạn tạm thời bị chặn"),
+  );
+  try {
+    d.window.document.body.insertAdjacentHTML(
+      "afterbegin",
+      '<div aria-hidden="true"><h2>Bạn tạm thời bị chặn</h2></div>',
+    );
+    assert.equal(run("read").blocked, false);
+    assert.equal(run("read").rateLimited, false);
+    assert.equal(run("inbox").threads.length, 1);
+  } finally {
+    d.window.close();
+  }
+});
 test("Messenger without aria-current binds the labelled conversation, composer and unique inbox URL for new incoming", () => {
   const { d, run } = fixture();
   try {

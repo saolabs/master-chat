@@ -2,7 +2,14 @@ import React, { useEffect, useRef, useState } from "react";
 import type { Command, Conversation, Snapshot } from "../core/types.ts";
 import { ContactProfilePanel } from "./contact-profile.tsx";
 import { messageContent } from "../core/response-style.ts";
-import { Send, Sparkles, X, LoaderCircle, RefreshCw } from "lucide-react";
+import {
+  Send,
+  Sparkles,
+  X,
+  LoaderCircle,
+  RefreshCw,
+  Search,
+} from "lucide-react";
 import {
   MessageEditor,
   MAX_MESSAGE_LENGTH,
@@ -35,9 +42,12 @@ export function ConversationPanel({
   const [goal, setGoal] = useState("");
   const replying = Boolean(snapshot.replying?.includes(c.id));
   const [sendAfterGenerate, setSendAfterGenerate] = useState(false);
+  const [historySearchOpen, setHistorySearchOpen] = useState(false);
   const [historySearch, setHistorySearch] = useState("");
   const [historyLimit, setHistoryLimit] = useState(50);
+  const historySearchToggle = useRef<HTMLButtonElement>(null);
   useEffect(() => {
+    setHistorySearchOpen(false);
     setHistorySearch("");
     setHistoryLimit(50);
   }, [c.id]);
@@ -180,7 +190,14 @@ export function ConversationPanel({
   useEffect(() => {
     if (followLatest.current && historyArea.current)
       historyArea.current.scrollTop = historyArea.current.scrollHeight;
-  }, [latestMessageId]);
+  }, [latestMessageId, historySearch, historySearchOpen]);
+  function closeHistorySearch() {
+    setHistorySearchOpen(false);
+    setHistorySearch("");
+    setHistoryLimit(50);
+    followLatest.current = true;
+    historySearchToggle.current?.focus();
+  }
   const live =
     snapshot.live?.conversationId === c.id ? snapshot.live : undefined;
   return (
@@ -219,6 +236,21 @@ export function ConversationPanel({
           }
         >
           <RefreshCw size={16} />
+        </button>
+        <button
+          ref={historySearchToggle}
+          type="button"
+          className="chat-search"
+          aria-label="Tìm trong hội thoại"
+          title="Tìm trong hội thoại"
+          aria-expanded={historySearchOpen}
+          aria-controls="conversation-history-search"
+          onClick={() => {
+            if (historySearchOpen) closeHistorySearch();
+            else setHistorySearchOpen(true);
+          }}
+        >
+          <Search size={16} />
         </button>
         <button onClick={open}>Mở trình duyệt ↗</button>
         <button
@@ -271,24 +303,40 @@ export function ConversationPanel({
       </div>
       <div className="conversation-body" ref={bodyArea}>
         <div className="chat-thread">
-          <div className="history-tools">
-            <input
-              type="search"
-              aria-label="Tìm trong lịch sử và bản chép âm thanh"
-              placeholder="Tìm trong lịch sử và bản chép âm thanh…"
-              value={historySearch}
-              onChange={(e) => {
-                setHistorySearch(e.target.value);
-                setHistoryLimit(50);
-                followLatest.current = false;
-              }}
-            />
-            <small>
-              {historySearch.trim()
-                ? `${matches.length} tin khớp trong ${c.messages.length} tin đã lưu`
-                : `${c.messages.length} tin đã lưu`}
-            </small>
-          </div>
+          {historySearchOpen && (
+            <div className="history-tools" id="conversation-history-search">
+              <input
+                autoFocus
+                type="search"
+                aria-label="Tìm trong lịch sử và bản chép âm thanh"
+                placeholder="Tìm tin nhắn, bản chép âm thanh…"
+                value={historySearch}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    closeHistorySearch();
+                  }
+                }}
+                onChange={(e) => {
+                  setHistorySearch(e.target.value);
+                  setHistoryLimit(50);
+                  followLatest.current = false;
+                }}
+              />
+              {historySearch.trim() && (
+                <small role="status">{matches.length} tin khớp</small>
+              )}
+              <button
+                type="button"
+                className="history-search-close"
+                aria-label="Đóng tìm kiếm"
+                title="Đóng tìm kiếm (Esc)"
+                onClick={closeHistorySearch}
+              >
+                <X size={16} />
+              </button>
+            </div>
+          )}
           <div
             className="history"
             ref={historyArea}
@@ -557,6 +605,7 @@ export function ConversationPanel({
                 busy={busy}
                 run={run}
                 showEvidence={(id) => {
+                  setHistorySearchOpen(true);
                   setHistorySearch(id);
                   setHistoryLimit(50);
                   followLatest.current = false;

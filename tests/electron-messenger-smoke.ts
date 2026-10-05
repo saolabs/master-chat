@@ -53,11 +53,19 @@ app.whenReady().then(async () => {
     let serverText = "Test incoming";
     let profileFixture = false;
     let pinOnLoad = false;
+    let rateLimitedPage = false;
+    let pageRequests = 0;
     session.protocol.handle("https", (request) => {
+      pageRequests++;
       if (new URL(request.url).hostname === "scontent.fbcdn.net")
         return new Response(new Uint8Array([1, 2, 3]), {
           headers: { "content-type": "image/png" },
         });
+      if (rateLimitedPage)
+        return new Response(
+          '<!doctype html><meta charset="utf-8"><h2>Bạn tạm thời bị chặn</h2><p>Có vẻ như bạn đang dùng nhầm tính năng này do sử dụng quá nhanh.</p><div contenteditable="true" role="textbox" aria-label="Viết cho Fixture Recipient"></div>',
+          { headers: { "content-type": "text/html;charset=utf-8" } },
+        );
       if (pinOnLoad)
         return new Response(
           `<!doctype html><meta charset="utf-8"><div id="ready" hidden><div role="grid" aria-label="Đoạn chat"><a aria-current="page" href="/messages/t/123/"><span dir="auto">Fixture Recipient</span></a></div><div role="article"><time datetime="${fixtureTimestamp}"></time><div role="button" aria-label="Tin nhắn do Fixture Recipient gửi lúc 10:19: Restored on startup"></div></div><div contenteditable="true" role="textbox" aria-label="Viết cho Fixture Recipient"></div></div><main id="restore"><h1>Nhập mã PIN</h1><p>Đồng bộ lịch sử đoạn chat</p><input type="password" maxlength="6"><button disabled>Tiếp tục</button></main><script>window.pinSubmits=0;const modal=document.querySelector('#restore');modal.querySelector('input').addEventListener('input',(event)=>{if(event.isTrusted)setTimeout(()=>modal.querySelector('button').disabled=false,100);});modal.querySelector('button').onclick=()=>{window.pinSubmits++;if(modal.querySelector('input').value==='012345'){modal.remove();document.querySelector('#ready').hidden=false;}};</script>`,
@@ -721,6 +729,34 @@ app.whenReady().then(async () => {
     const restoredInbox = await b.scanInbox(account.id);
     assert.equal(restoredInbox.threads.length, 1);
     assert.equal(state.accounts[0].pinAutoFillBlocked, false);
+    // A full-page rate limit stops every background view for this account.
+    // Repeated sync ticks must produce no further navigation or media requests.
+    rateLimitedPage = true;
+    b.invalidateSync(account.id);
+    const pausesBeforeRateLimit = pauses;
+    await assert.rejects(b.scanInbox(account.id), /Facebook tạm thời chặn/);
+    assert.ok(pauses > pausesBeforeRateLimit);
+    const requestsAfterRateLimit = pageRequests;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await assert.rejects(
+        b.scanInbox(account.id),
+        /Đồng bộ tài khoản đã dừng/,
+      );
+      await assert.rejects(b.readConversation(c), /Đồng bộ tài khoản đã dừng/);
+      await assert.rejects(
+        b.readLiveConversation(c),
+        /Đồng bộ tài khoản đã dừng/,
+      );
+      await assert.rejects(
+        b.readAttachment(c, "voice", "audio"),
+        /Đồng bộ tài khoản đã dừng/,
+      );
+    }
+    assert.equal(pageRequests, requestsAfterRateLimit);
+    assert.equal(
+      (b as unknown as { workers: Map<string, unknown> }).workers.size,
+      0,
+    );
     console.log(
       "Chromium fixture passed: virtualized inbox recipient proof, transient modal recovery, native/profile queue-local send and echo, pre-send failure classification, reconnect refresh, draft preservation, DOM/account guards, media, history and PIN no-retry guard.",
     );

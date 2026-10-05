@@ -57,6 +57,7 @@ export class Browsers {
   private pageRefreshes = new WeakMap<WebContents, number>();
   private pageAccounts = new WeakMap<WebContents, string>();
   private pageStatuses = new WeakMap<WebContents, string>();
+  private rateLimitedAccounts = new Map<string, string>();
   private selected: string | null = null;
   private bounds: Electron.Rectangle | null = null;
   private loginAttempts = new Map<string, { wcId: number; at: number }>();
@@ -666,7 +667,9 @@ export class Browsers {
     this.changed();
   }
   reload(id: string) {
-    this.get(id).view.webContents.reload();
+    const entry = this.get(id);
+    this.rateLimitedAccounts.delete(entry.meta.accountId);
+    entry.view.webContents.reload();
   }
   async inspect(id: string, profile?: DOMProfile) {
     const e = this.get(id),
@@ -685,12 +688,25 @@ export class Browsers {
     action: Parameters<typeof messengerScript>[0],
     options: NativeOptions = {},
   ) {
+    const accountId = this.pageAccounts.get(wc);
+    if (accountId) this.assertNotRateLimited(accountId);
     // Electron otherwise replaces script exceptions with an opaque execution error.
     const result = await wc.executeJavaScript(
-      `(() => {try {return {ok:true,data:${messengerScript(action, options)}};} catch(error) {return {ok:false,error: error instanceof Error ? error.message : "Không đọc được Messenger."};}})()`,
+      `(() => {try {return {ok:true,data:${messengerScript(action, options)}};} catch(error) {return {ok:false,rateLimited: error?.rateLimited === true,error: error instanceof Error ? error.message : "Không đọc được Messenger."};}})()`,
     );
+    if (result.rateLimited || result.data?.rateLimited) {
+      const reason = result.error ?? result.data.blockedReason;
+      if (accountId) this.rateLimitedAccounts.set(accountId, reason);
+      this.loginStatus(wc, reason);
+      this.pause(reason);
+      throw new Error(reason);
+    }
     if (!result.ok) throw new Error(result.error);
     return result.data;
+  }
+  private assertNotRateLimited(accountId: string) {
+    const reason = this.rateLimitedAccounts.get(accountId);
+    if (reason) throw new Error(reason);
   }
   invalidateSync(accountId?: string) {
     if (!accountId) {
@@ -706,6 +722,8 @@ export class Browsers {
         this.pageRefreshes.delete(view.webContents);
   }
   private async preparePage(wc: WebContents, url: string, samePage: boolean) {
+    const accountId = this.pageAccounts.get(wc);
+    if (accountId) this.assertNotRateLimited(accountId);
     const now = Date.now();
     const refreshedAt = this.pageRefreshes.get(wc);
     if (samePage && refreshedAt !== undefined && now - refreshedAt < 60_000)
@@ -721,6 +739,7 @@ export class Browsers {
     }
     await wc.loadURL(url);
     this.pageRefreshes.set(wc, now);
+    await this.native(wc, "read");
   }
   private async assertSession(wc: WebContents, account: Account) {
     const cookies = await wc.session.cookies.get({
@@ -743,6 +762,7 @@ export class Browsers {
   }
   async scanInbox(accountId: string): Promise<InboxScan> {
     return this.serialized(`inbox:${accountId}`, async () => {
+      this.assertNotRateLimited(accountId);
       const a = this.account(accountId);
       let view = this.monitors.get(accountId);
       if (!view) {
@@ -778,7 +798,8 @@ export class Browsers {
           }
           first = await this.native(wc, "inbox");
           break;
-        } catch {
+        } catch (error) {
+          this.assertNotRateLimited(accountId);
           await new Promise((r) => setTimeout(r, 250));
         }
       }
@@ -823,6 +844,7 @@ export class Browsers {
     });
   }
   private async worker(a: Account, conversationId: string) {
+    this.assertNotRateLimited(a.id);
     let worker = this.workers.get(conversationId);
     if (worker?.webContents.isDestroyed()) {
       this.workers.delete(conversationId);
@@ -919,6 +941,7 @@ export class Browsers {
     c: Conversation,
     profile?: DOMProfile,
   ): Promise<Omit<Message, "baseline">[]> {
+    this.assertNotRateLimited(c.accountId);
     const a = this.account(c.accountId);
     if (
       [...this.entries.values()].some(

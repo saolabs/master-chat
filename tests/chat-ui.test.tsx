@@ -377,10 +377,13 @@ test("cached audio is labelled and searchable across older local history", async
       .querySelector(".history")!
       .textContent!.includes("Hẹn bạn"),
   );
+  assert.equal(r.dom.window.document.querySelector(".history-tools"), null);
+  await r.click("Tìm trong hội thoại");
   const search =
     r.dom.window.document.querySelector<HTMLInputElement>(
       "input[type=search]",
     )!;
+  assert.equal(r.dom.window.document.activeElement, search);
   await act(async () => {
     Object.getOwnPropertyDescriptor(
       r.dom.window.HTMLInputElement.prototype,
@@ -398,8 +401,30 @@ test("cached audio is labelled and searchable across older local history", async
   );
   assert.match(
     r.dom.window.document.querySelector(".history-tools")!.textContent!,
-    /1 tin khớp trong 80/,
+    /1 tin khớp/,
   );
+  await act(async () => {
+    search.dispatchEvent(
+      new r.dom.window.KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+      }),
+    );
+  });
+  assert.equal(r.dom.window.document.querySelector(".history-tools"), null);
+  assert.equal(
+    r.dom.window.document.activeElement?.getAttribute("aria-label"),
+    "Tìm trong hội thoại",
+  );
+  assert.equal(r.dom.window.document.querySelectorAll(".message").length, 50);
+  await r.click("Tìm trong hội thoại");
+  assert.equal(
+    r.dom.window.document.querySelector<HTMLInputElement>("input[type=search]")!
+      .value,
+    "",
+  );
+  await r.click("Đóng tìm kiếm");
+  assert.equal(r.dom.window.document.querySelector(".history-tools"), null);
 });
 
 test("relationship context and long-term direction are saved separately and optional", async (t) => {

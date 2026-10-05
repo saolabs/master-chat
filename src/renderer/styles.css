@@ -1651,17 +1651,37 @@ summary:focus-visible {
 .history-tools {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 10px 16px;
+  gap: 8px;
+  padding: 6px 16px;
   border-bottom: 1px solid #e6eaf3;
   flex-shrink: 0;
 }
 .history-tools input {
   flex: 1;
-  min-width: 120px;
+  min-width: 0;
+  height: 32px;
+  padding: 5px 9px;
+  font-size: 12px;
 }
 .history-tools small {
   flex-shrink: 0;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.chat-header .chat-search,
+.history-search-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+}
+.chat-search[aria-expanded="true"] {
+  color: #4b60c6;
+  background: #edf1ff;
+  border-color: #bdc9e3;
 }
 .history-more {
   display: block;
@@ -1702,15 +1722,6 @@ summary:focus-visible {
 }
 .reply-review summary {
   cursor: pointer;
-}
-@media (max-width: 650px) {
-  .history-tools {
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-  .history-tools input {
-    flex-basis: 100%;
-  }
 }
 
 .section-heading {
